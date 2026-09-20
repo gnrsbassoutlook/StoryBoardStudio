@@ -34,7 +34,7 @@ echo "💡 提示：同局域网设备可通过本机 IP:7861 访问协作！"
 (sleep 2 && open "http://localhost:7861") &
 
 # 启动 Python 服务
-python3 app.py
+python3 StoryBoardStudio.py
 
 # 退出提示
 read -p "服务已停止，按回车键关闭窗口..."
