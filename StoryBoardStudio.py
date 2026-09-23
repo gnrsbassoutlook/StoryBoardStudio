@@ -29,20 +29,21 @@ def load_config():
                 return json.load(f)
         except:
             pass
-    return {"path_a": "", "path_b": "", "asset_dir": "", "video_dir": ""}
+    return {"path_a": "", "path_b": "", "asset_dir": "", "video_dir": "", "audio_dir": ""}
 
-def save_config(path_a, path_b, asset_dir, video_dir):
+def save_config(path_a, path_b, asset_dir, video_dir, audio_dir):
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump({
             "path_a": path_a,
             "path_b": path_b,
             "asset_dir": asset_dir,
-            "video_dir": video_dir
+            "video_dir": video_dir,
+            "audio_dir": audio_dir
         }, f, ensure_ascii=False, indent=2)
 
 # ==============================
-# 1. 资产索引与工具函数
+# 1. 资产索引与冲突检测（精准匹配X/Y/Z编码）
 # ==============================
 def clean_path(path_str: str) -> str:
     if not path_str:
@@ -51,41 +52,58 @@ def clean_path(path_str: str) -> str:
     p = p.replace("\\ ", " ")
     return os.path.abspath(p)
 
-def build_image_index(asset_dir: str):
-    index = {}
-    if not asset_dir or not os.path.isdir(asset_dir):
-        return index
-    valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff'}
-    pattern = re.compile(r"^([a-zA-Z0-9]+)[._\-]")
-    for root, _, files in os.walk(asset_dir):
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in valid_exts:
-                match = pattern.match(f)
-                if match:
-                    code = match.group(1).upper()
-                else:
-                    code = os.path.splitext(f)[0].upper()
-                index[code] = os.path.join(root, f)
-    return index
+def natural_sort_key(s: str):
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
-def build_audio_index(asset_dir: str):
+def _build_index_and_conflicts(root_dir: str, valid_exts: set):
     index = {}
-    if not asset_dir or not os.path.isdir(asset_dir):
-        return index
-    valid_exts = {'.mp3', '.wav', '.aac', '.m4a', '.flac'}
-    pattern = re.compile(r"^([a-zA-Z0-9]+)[._\-]")
-    for root, _, files in os.walk(asset_dir):
+    conflicts = []
+    if not root_dir or not os.path.isdir(root_dir):
+        return index, conflicts
+    
+    code_groups = {}
+    # 仅匹配X/Y/Z开头+数字的资产编码，可选后缀字母
+    prefix_pattern = re.compile(r"^([XYZxyz]\d+[a-zA-Z]?)[._\-]")
+    
+    for root, _, files in os.walk(root_dir):
         for f in files:
             ext = os.path.splitext(f)[1].lower()
-            if ext in valid_exts:
-                match = pattern.match(f)
-                if match:
-                    code = match.group(1).upper()
-                else:
-                    code = os.path.splitext(f)[0].upper()
-                index[code] = os.path.join(root, f)
-    return index
+            if ext not in valid_exts:
+                continue
+            
+            full_path = os.path.join(root, f)
+            file_name_no_ext = os.path.splitext(f)[0]
+            
+            # 前缀编码匹配（仅X/Y/Z开头的标准资产编码）
+            match = prefix_pattern.match(f)
+            if match:
+                prefix_code = match.group(1).upper()
+                if prefix_code not in code_groups:
+                    code_groups[prefix_code] = []
+                code_groups[prefix_code].append((f, full_path))
+            
+            # 完整文件名匹配（支持镜头号命名，不参与冲突检测）
+            full_code = file_name_no_ext.upper()
+            if full_code not in index:
+                index[full_code] = full_path
+    
+    # 生成索引与冲突列表
+    for code, file_list in code_groups.items():
+        file_list.sort(key=lambda x: natural_sort_key(x[0]))
+        index[code] = file_list[0][1]
+        if len(file_list) > 1:
+            conflict_names = "、".join([f[0] for f in file_list])
+            conflicts.append(f"{code} → {conflict_names}")
+    
+    return index, conflicts
+
+def build_image_index(asset_dir: str):
+    valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff'}
+    return _build_index_and_conflicts(asset_dir, valid_exts)
+
+def build_audio_index(audio_dir: str):
+    valid_exts = {'.mp3', '.wav', '.aac', '.m4a', '.flac'}
+    return _build_index_and_conflicts(audio_dir, valid_exts)
 
 def build_video_list(video_dir: str):
     video_paths = []
@@ -123,11 +141,8 @@ def backup_excel(filepath: str):
     backup_path = os.path.join(backup_dir, f"{name}_{timestamp}{ext}")
     shutil.copy2(filepath, backup_path)
 
-def natural_sort_key(s: str):
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
-
 # ==============================
-# 2. 核心表格渲染引擎
+# 2. 核心表格渲染引擎（D/E列互换）
 # ==============================
 def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
     if df is None or df.empty:
@@ -138,88 +153,116 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
     for idx, row in df.iterrows():
         shot_id = str(row.iloc[0]) if len(row) > 0 and pd.notna(row.iloc[0]) else f"Sht{idx+1:02d}"
         title = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
-        try:
-            raw_dur = float(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else 0.0
-        except:
-            raw_dur = 0.0
-        img_codes_str = str(row.iloc[3]) if len(row) > 3 and pd.notna(row.iloc[3]) else ""
-        audio_codes_str = str(row.iloc[4]) if len(row) > 4 and pd.notna(row.iloc[4]) else ""
-        prompt = str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+        
+        # C列：双模式兼容
+        c_content = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
+        c_content_strip = c_content.strip()
+        
+        c_cell_top = ""
+        if re.match(r'^\d+(\.\d+)?$', c_content_strip):
+            c_cell_top = f"""
+            <div class="dur-text">
+                <span class="dur-value">{c_content_strip}</span>
+            </div>"""
+        else:
+            code_upper = c_content_strip.upper()
+            if code_upper and code_upper != '0' and code_upper in audio_index:
+                file_url = f"/api/local_media?filepath={urllib.parse.quote(audio_index[code_upper])}"
+                c_cell_top = f"""
+                <div class="audio-card single-audio">
+                    <span class="asset-badge-audio">{c_content_strip}</span>
+                    <audio controls preload="auto" src="{file_url}" class="audio-player" onclick="event.stopPropagation()" playsinline>
+                </div>"""
+            else:
+                c_cell_top = f"""
+                <div class="dur-text">
+                    <span class="dur-value">{c_content_strip}</span>
+                </div>"""
+        
+        c_cell = f"""
+        <div class="cell-flex-wrapper">
+            {c_cell_top}
+            <input type="text" class="raw-text-edit" data-col="dur" value="{c_content}" placeholder="音频编码/时长"/>
+        </div>"""
 
-        vid_path = find_matching_video(shot_id, video_paths)
+        # D列：台词内容/角色
+        dialogue_text = str(row.iloc[3]) if len(row) > 3 and pd.notna(row.iloc[3]) else ""
+        dialogue_cell = f"""
+        <div class="cell-flex-wrapper">
+            <textarea class="dialogue-input" data-col="dialogue" placeholder="台词内容/角色">{dialogue_text}</textarea>
+        </div>"""
 
-        # 图片资产
+        # E列：图片资产
+        img_codes_str = str(row.iloc[4]) if len(row) > 4 and pd.notna(row.iloc[4]) else ""
         img_items = [c.strip() for c in img_codes_str.split('|') if c.strip() and c.strip() != '0']
         img_previews = []
         for code in img_items[:6]:
-            code_upper = code.upper()
-            if code_upper in image_index:
-                file_url = f"/api/local_media?filepath={urllib.parse.quote(image_index[code_upper])}"
+            code_up = code.upper()
+            if code_up in image_index:
+                file_url = f"/api/local_media?filepath={urllib.parse.quote(image_index[code_up])}"
                 img_previews.append(f"""
                     <div class="asset-card" onclick="openLightbox('{file_url}')" title="点击放大: {code}">
                         <img src="{file_url}" alt="{code}" class="thumbnail-img"/>
                         <span class="asset-badge">{code}</span>
                     </div>""")
             else:
-                img_previews.append(f"""<div class="asset-card missing" title="未找到文件"><span class="asset-badge">{code}</span><div class="missing-placeholder">无文件</div></div>""")
+                img_previews.append(f"""<div class="asset-card missing" title="未找到文件"><span class="asset-badge">{code}</span><div class="missing-placeholder">无</div></div>""")
 
-        img_grid = f"<div class='img-grid'>{''.join(img_previews)}</div>" if img_previews else ""
-        img_cell_content = f"""<div class="cell-flex-wrapper">{img_grid}<input type="text" class="raw-text-edit" data-col="img" value="{img_codes_str}" placeholder="图片资产"/></div>"""
+        img_grid = f"<div class='img-grid'>{''.join(img_previews)}</div>"
+        img_cell_content = f"""
+        <div class="cell-flex-wrapper">
+            {img_grid}
+            <input type="text" class="raw-text-edit img-code-input" value="{img_codes_str}" data-col="img" placeholder="图片编码"/>
+        </div>"""
 
-        # 声音资产
-        audio_items = [c.strip() for c in audio_codes_str.split('|') if c.strip() and c.strip() != '0']
-        audio_previews = []
-        for code in audio_items[:3]:
-            code_upper = code.upper()
-            if code_upper in audio_index:
-                file_url = f"/api/local_media?filepath={urllib.parse.quote(audio_index[code_upper])}"
-                audio_previews.append(f"""
-                <div class="audio-card">
-                    <span class="asset-badge-audio">{code}</span>
-                    <audio controls preload="auto" src="{file_url}" class="audio-player" onclick="event.stopPropagation()">
-                </div>""")
-            else:
-                audio_previews.append(f"""
-                <div class="audio-card missing">
-                    <span class="asset-badge-audio">{code} (未找到)</span>
-                </div>""")
+        prompt = str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
 
-        audio_stack = f"<div class='audio-stack'>{''.join(audio_previews)}</div>" if audio_previews else ""
-        audio_cell_content = f"""<div class="cell-flex-wrapper">{audio_stack}<input type="text" class="raw-text-edit" data-col="audio" value="{audio_codes_str}" placeholder="声音资产"/></div>"""
+        vid_path = find_matching_video(shot_id, video_paths)
 
-        # 视频结果：默认无控件，悬停显示
+        # G列视频
         video_preview = ""
         if vid_path:
             vid_url = f"/api/local_media?filepath={urllib.parse.quote(vid_path)}"
             video_preview = f"""
-            <div class="video-cell-wrapper">
+            <div class="cell-flex-wrapper">
                 <div class="video-wrap" 
                      onmouseenter="this.querySelector('video').controls = true"
                      onmouseleave="this.querySelector('video').controls = false">
                     <video class="video-player"
                            preload="metadata"
+                           playsinline
                            onplay="pauseOtherVideos(this)">
                         <source src="{vid_url}">
                     </video>
                     <button class="video-expand-btn" onclick="openVideoLightbox('{vid_url}', this)" title="放大查看">⛶</button>
                 </div>
-                <input type="text" class="raw-text-edit" data-col="video" value="" placeholder="自动匹配"/>
+                <div class="video-label">自动匹配</div>
+            </div>
+            """
+        else:
+            video_preview = f"""
+            <div class="cell-flex-wrapper">
+                <div class="video-empty">
+                    <span>自动匹配</span>
+                </div>
             </div>
             """
 
-        video_cell_content = f"""<div class="cell-flex-wrapper">{video_preview}</div>"""
-
         rows_html.append(f"""
             <tr data-row-idx="{idx}" class="storyboard-row" onclick="onRowClick(this)">
-                <td class="col-shot"><input type="text" class="raw-text-edit cell-center shot-input" data-col="shot" value="{shot_id}"/></td>
-                <td class="col-title"><textarea class="raw-text-edit area-title" data-col="title">{title}</textarea></td>
-                <td class="col-dur">
-                    <input type="text" class="raw-text-edit cell-center dur-input" data-col="dur" value="{raw_dur}"/>
+                <td class="col-shot">
+                    <input type="text" class="raw-text-edit cell-center shot-input" data-col="shot" value="{shot_id}"/>
                 </td>
+                <td class="col-title">
+                    <textarea class="raw-text-edit area-title" data-col="title">{title}</textarea>
+                </td>
+                <td class="col-dur">{c_cell}</td>
+                <td class="col-dialogue">{dialogue_cell}</td>
                 <td class="col-img">{img_cell_content}</td>
-                <td class="col-audio">{audio_cell_content}</td>
-                <td class="col-prompt"><div class="prompt-box" data-col="prompt" contenteditable="true">{prompt}</div></td>
-                <td class="col-video">{video_cell_content}</td>
+                <td class="col-prompt">
+                    <textarea class="prompt-box" data-col="prompt">{prompt}</textarea>
+                </td>
+                <td class="col-video">{video_preview}</td>
             </tr>
         """)
 
@@ -232,11 +275,11 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                 <tr>
                     <th class="col-shot">A.镜头号</th>
                     <th class="col-title">B.小标题</th>
-                    <th class="col-dur">C.时长</th>
-                    <th class="col-img">D.图片资产 (预览+编辑)</th>
-                    <th class="col-audio">E.声音资产 (预览+编辑)</th>
-                    <th class="col-prompt">F.生视频提示词 (点击本行大字显示)</th>
-                    <th class="col-video">G.视频结果 (预览+编辑)</th>
+                    <th class="col-dur">C.音频结果（模式1）/镜头时长（模式2）</th>
+                    <th class="col-dialogue">D.台词内容（模式1）/台词角色（模式2）</th>
+                    <th class="col-img">E.图片资产</th>
+                    <th class="col-prompt">F.生视频提示词</th>
+                    <th class="col-video">G.视频结果</th>
                 </tr>
             </thead>
             <tbody>{table_body}</tbody>
@@ -251,9 +294,9 @@ CUSTOM_CSS = """
 :root {
     --col-scale: 1.0;
     --row-scale: 1.0;
-    --img-base-w: 80px;
-    --img-base-h: 56px;
-    --header-height: 44px;
+    --img-base-w: 82px;
+    --img-base-h: 58px;
+    --header-height: 36px;
 }
 
 .hidden-element { display: none !important; }
@@ -264,6 +307,26 @@ CUSTOM_CSS = """
     color: #e1e4ea !important;
 }
 
+/* 冲突提示区 */
+.conflict-panel {
+    padding: 4px 10px;
+    background: #2a1618;
+    border: 1px solid #5c2e2e;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    max-height: 60px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-size: 11px;
+    color: #f08890;
+    line-height: 1.5;
+}
+.conflict-panel:empty { display: none; }
+.conflict-panel .conflict-item {
+    display: block;
+    margin-bottom: 2px;
+}
+
 /* Toast 提示 */
 .toast-box {
     position: fixed;
@@ -271,9 +334,9 @@ CUSTOM_CSS = """
     left: 50%;
     transform: translateX(-50%);
     z-index: 10000;
-    padding: 12px 24px;
+    padding: 10px 20px;
     border-radius: 8px;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     opacity: 0;
@@ -284,27 +347,8 @@ CUSTOM_CSS = """
 .toast-error { background: #5c2e2e; color: #f8d7da; border: 1px solid #7a3a3a; }
 .toast-show { opacity: 1; top: 30px; }
 
-/* 顶部工具栏 第一行 */
+/* 顶部工具栏 */
 .top-toolbar-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    background: #1c2027;
-    border: 1px solid #2b303c;
-    border-radius: 8px;
-    margin-bottom: 8px;
-}
-
-/* 复选框更紧凑 */
-.col-checkbox-wrap {
-    flex: 1;
-    display: flex;
-    align-items: center;
-}
-
-/* 顶部工具栏 第二行：视图微调 */
-.view-toolbar-row {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -312,72 +356,82 @@ CUSTOM_CSS = """
     background: #1c2027;
     border: 1px solid #2b303c;
     border-radius: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+}
+
+.col-checkbox-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+}
+
+.view-toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: #1c2027;
+    border: 1px solid #2b303c;
+    border-radius: 8px;
+    margin-bottom: 6px;
     flex-wrap: nowrap;
 }
 
 .view-toolbar-row button {
-    min-height: 30px !important;
-    font-size: 12px !important;
-    padding: 0 10px !important;
+    min-height: 28px !important;
+    font-size: 11px !important;
+    padding: 0 8px !important;
     flex-shrink: 0;
 }
 
-/* 主提示区 + 保存按钮行 */
+/* 主提示区 + 保存按钮 */
 .prompt-save-row {
     display: flex;
     align-items: stretch;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 8px;
+    margin-bottom: 6px;
 }
 
 .master-prompt-preview {
     flex: 1;
-    padding: 10px 12px;
+    padding: 8px 10px;
     background: #1c2027;
-    border-left: 4px solid #ebcb8b;
+    border-left: 3px solid #ebcb8b;
     border-radius: 4px;
-    height: 122px;
+    height: 90px;
     box-sizing: border-box;
     overflow-y: auto;
     overflow-x: hidden;
-    font-size: 15px;
-    line-height: 1.55;
+    font-size: 14px;
+    line-height: 1.5;
     color: #f0f3f8;
     white-space: pre-wrap !important;
     word-wrap: break-word !important;
-    overflow-wrap: break-word !important;
-    word-break: break-word;
-}
-
-.master-prompt-preview:empty::before {
-    content: "👈 点击下方表格任意行，此处将大字号展示该镜头的完整生视频提示词。";
-    color: #8c9ba5;
 }
 
 .save-btn {
-    min-height: 30px !important;
+    min-height: 28px !important;
     align-self: stretch;
-    min-width: 180px !important;
+    min-width: 160px !important;
+    font-size: 13px !important;
 }
 
 /* 表格视口 */
 .storyboard-viewport {
     width: 100%;
     overflow: auto;
-    max-height: 70vh;
+    max-height: 72vh;
     border: 1px solid #2b303c;
     border-radius: 8px;
     background: #181a20;
     scroll-behavior: smooth;
-    -webkit-overflow-scrolling: touch;
 }
 
 .storyboard-table {
     width: max-content;
     min-width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 12px;
     table-layout: fixed;
 }
 
@@ -394,11 +448,12 @@ CUSTOM_CSS = """
     line-height: var(--header-height);
     padding: 0 8px;
     white-space: nowrap;
+    font-size: 12px;
 }
 
 .storyboard-table td {
     border-bottom: 1px solid #282c37;
-    padding: 6px;
+    padding: 4px 6px;
     vertical-align: top;
 }
 
@@ -413,37 +468,55 @@ CUSTOM_CSS = """
 }
 
 /* 列宽 */
-.col-shot { width: calc(78px * var(--col-scale)); }
-.col-title { width: calc(145px * var(--col-scale)); }
-.col-dur { width: calc(56px * var(--col-scale)); }
-.col-img { width: calc(300px * var(--col-scale)); }
-.col-audio { width: calc(290px * var(--col-scale)); }
-.col-prompt { width: calc(360px * var(--col-scale)); }
-.col-video { width: calc(240px * var(--col-scale)); }
+.col-shot { width: calc(72px * var(--col-scale)); }
+.col-title { width: calc(130px * var(--col-scale)); }
+.col-dur { width: calc(220px * var(--col-scale)); }
+.col-dialogue { width: calc(190px * var(--col-scale)); }
+.col-img { width: calc(290px * var(--col-scale)); }
+.col-prompt { width: calc(330px * var(--col-scale)); }
+.col-video { width: calc(230px * var(--col-scale)); }
 
-/* 图片网格 */
+/* D列台词 */
+.dialogue-input {
+    background: #14161b;
+    border: 1px solid #2e3440;
+    padding: 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #c8d1e0;
+    resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 70px;
+    max-height: 110px;
+    font-family: inherit;
+}
+
+/* E列图片 */
 .img-grid {
     display: grid;
     grid-template-columns: repeat(3, calc(var(--img-base-w) * var(--col-scale)));
-    gap: 5px;
-    width: max-content;
+    gap: 4px;
+    width: 100%;
 }
 
 .asset-card {
     position: relative;
     width: calc(var(--img-base-w) * var(--col-scale));
     height: calc(var(--img-base-h) * var(--col-scale));
-    border-radius: 4px;
+    border-radius: 3px;
     overflow: hidden;
     border: 1px solid #3b4252;
-    background: #000;
+    background: #0a0a0f;
     box-sizing: border-box;
+    flex-shrink: 0;
 }
 
 .thumbnail-img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     display: block;
 }
 
@@ -473,16 +546,36 @@ CUSTOM_CSS = """
     line-height: 14px;
 }
 
+.img-code-input {
+    font-size: 10px !important;
+    padding: 2px 6px !important;
+    margin-top: 2px;
+}
+
 .cell-flex-wrapper {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
 }
 
-.audio-stack {
+/* C列 */
+.single-audio {
+    margin-top: 2px;
+}
+
+.dur-text {
     display: flex;
-    flex-direction: column;
+    align-items: baseline;
     gap: 4px;
+    padding: 6px 6px;
+    background: #232731;
+    border-radius: 4px;
+    margin-top: 2px;
+}
+.dur-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: #ebcb8b;
 }
 
 .audio-card {
@@ -490,20 +583,15 @@ CUSTOM_CSS = """
     align-items: center;
     gap: 6px;
     background: #232731;
-    padding: 4px 8px;
+    padding: 3px 6px;
     border-radius: 4px;
 }
 
-.audio-card.missing {
-    opacity: 0.6;
-    border: 1px dashed #bf616a;
-}
-
 .audio-player {
-    height: 30px;
+    height: 28px;
     width: 100%;
-    min-width: 180px;
     flex: 1;
+    min-width: 120px;
 }
 
 .asset-badge-audio {
@@ -514,39 +602,42 @@ CUSTOM_CSS = """
     flex-shrink: 0;
 }
 
-/* 视频单元格 */
+/* G列视频 */
 .video-cell-wrapper {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 3px;
 }
 
 .video-wrap {
     position: relative;
     width: 100%;
     cursor: pointer;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #000;
 }
 
 .video-player {
     width: 100%;
-    max-height: 110px;
-    border-radius: 4px;
-    background: #000;
+    max-height: 100px;
     display: block;
+    object-fit: contain;
+    background: #000;
 }
 
 .video-expand-btn {
     position: absolute;
     bottom: 4px;
     right: 4px;
-    width: 24px;
-    height: 24px;
+    width: 22px;
+    height: 22px;
     border: none;
     border-radius: 4px;
     background: rgba(0,0,0,0.7);
     color: #fff;
-    font-size: 14px;
-    line-height: 24px;
+    font-size: 12px;
+    line-height: 22px;
     text-align: center;
     cursor: pointer;
     padding: 0;
@@ -559,15 +650,30 @@ CUSTOM_CSS = """
     opacity: 1;
 }
 
-.video-expand-btn:hover {
-    background: rgba(0,0,0,0.9);
+.video-label {
+    font-size: 10px;
+    color: #8c9ba5;
+    text-align: center;
 }
 
+.video-empty {
+    height: 100px;
+    background: #0a0a0f;
+    border: 1px solid #2e3440;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    font-size: 11px;
+}
+
+/* 通用输入框 */
 .raw-text-edit {
     background: #16181f;
     border: 1px solid #3e4452;
     color: #a3be8c;
-    padding: 4px 6px;
+    padding: 3px 6px;
     font-size: 11px;
     font-family: monospace;
     border-radius: 4px;
@@ -585,52 +691,49 @@ CUSTOM_CSS = """
     text-align: center;
 }
 
-/* A.镜头号字体缩小一档 */
 .shot-input {
-    height: calc(95px * var(--row-scale));
-    font-size: 14px !important;
+    height: 30px;
+    font-size: 13px !important;
     color: #f4f6fa !important;
     font-weight: 500;
+    margin-top: 4px;
 }
 
 .area-title {
-    height: calc(120px * var(--row-scale));
+    height: 70px;
     resize: vertical;
-    font-size: 14px !important;
+    font-size: 13px !important;
     color: #f4f6fa !important;
-    line-height: 1.5;
+    line-height: 1.4;
+    font-family: inherit;
 }
 
-.dur-input {
-    margin-top: 8px;
-}
-
-/* F列提示词框：固定高度，内部滚动 */
+/* F列提示词 */
 .prompt-box {
     background: #14161b;
     border: 1px solid #2e3440;
-    padding: 8px;
+    padding: 6px;
     border-radius: 4px;
-    min-height: calc(100px * var(--row-scale));
-    max-height: calc(138px * var(--row-scale));
+    resize: vertical;
+    min-height: 90px;
+    max-height: 130px;
     overflow-y: auto;
     overflow-x: hidden;
-    font-size: 13px;
-    line-height: 1.6;
+    font-size: 12px;
+    line-height: 1.5;
     color: #eceff4;
     white-space: pre-wrap !important;
     word-wrap: break-word !important;
-    overflow-wrap: break-word !important;
-    word-break: break-word;
     width: 100%;
     box-sizing: border-box;
+    font-family: inherit;
 }
 
-/* 图片灯箱 */
-#lightboxModal {
+/* 灯箱 */
+#lightboxModal, #videoLightboxModal {
     display: none;
     position: fixed;
-    z-index: 99999;
+    z-index: 9999;
     left: 0;
     top: 0;
     width: 100%;
@@ -640,28 +743,7 @@ CUSTOM_CSS = """
     align-items: center;
 }
 
-#lightboxModal img {
-    max-width: 92%;
-    max-height: 92%;
-    border-radius: 6px;
-    box-shadow: 0 0 20px rgba(0,0,0,0.9);
-}
-
-/* 视频灯箱 */
-#videoLightboxModal {
-    display: none;
-    position: fixed;
-    z-index: 99999;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0,0,0,0.88);
-    justify-content: center;
-    align-items: center;
-}
-
-#videoLightboxModal video {
+#lightboxModal img, #videoLightboxModal video {
     max-width: 92%;
     max-height: 92%;
     border-radius: 6px;
@@ -742,7 +824,7 @@ window.onRowClick = function(tr) {
     const promptDiv = tr.querySelector('[data-col="prompt"]');
     const box = document.getElementById('masterPromptBox');
     if (promptDiv && box) {
-        const text = promptDiv.innerText || '';
+        const text = promptDiv.value || '';
         box.innerHTML = "<b style='color:#ebcb8b'>[本镜提示词]：</b>" + (text ? text : "<i style='color:#8c9ba5'>无提示词内容</i>");
     }
 };
@@ -775,7 +857,7 @@ window.openVideoLightbox = function(src, btnEl) {
     if (!modal) {
         modal = document.createElement('div');
         modal.id = 'videoLightboxModal';
-        modal.innerHTML = '<video id="lightboxVideo" controls preload="auto" onclick="event.stopPropagation()"></video>';
+        modal.innerHTML = '<video id="lightboxVideo" controls preload="auto" onclick="event.stopPropagation()" playsinline></video>';
         modal.onclick = function() {
             const v = document.getElementById('lightboxVideo');
             if (v) v.pause();
@@ -791,22 +873,19 @@ window.openVideoLightbox = function(src, btnEl) {
     video.play().catch(() => {});
 };
 
-// 修复：勾选显示，不勾选隐藏
 window.applyColVisibility = function(selectedList) {
     const colMap = {
         "镜头号": "col-shot",
         "小标题": "col-title",
-        "时长": "col-dur",
+        "音频结果/镜头时长": "col-dur",
+        "台词内容/台词角色": "col-dialogue",
         "图片资产": "col-img",
-        "声音资产": "col-audio",
         "提示词": "col-prompt",
         "视频结果": "col-video"
     };
-    // 先全部隐藏
     Object.values(colMap).forEach(cls => {
         document.querySelectorAll('.' + cls).forEach(el => el.style.display = 'none');
     });
-    // 选中的显示
     selectedList.forEach(name => {
         const cls = colMap[name];
         if (cls) {
@@ -815,6 +894,7 @@ window.applyColVisibility = function(selectedList) {
     });
 };
 
+// Excel保存
 window.saveToExcel = function() {
     const viewport = document.getElementById('storyboardViewport');
     const sheetName = viewport ? viewport.dataset.sheetName : '';
@@ -825,17 +905,20 @@ window.saveToExcel = function() {
     }
 
     let rows = [];
-    document.querySelectorAll('#storyboardTable tbody tr').forEach(tr => {
+    const trList = document.querySelectorAll('#storyboardTable tbody tr');
+    
+    for (let i = 0; i < trList.length; i++) {
+        const tr = trList[i];
         rows.push({
             shot: tr.querySelector('[data-col="shot"]')?.value || "",
             title: tr.querySelector('[data-col="title"]')?.value || "",
-            dur: tr.querySelector('[data-col="dur"]')?.value || "0",
+            dur: tr.querySelector('[data-col="dur"]')?.value || "",
+            dialogue: tr.querySelector('[data-col="dialogue"]')?.value || "",
             img: tr.querySelector('[data-col="img"]')?.value || "",
-            audio: tr.querySelector('[data-col="audio"]')?.value || "",
-            prompt: tr.querySelector('[data-col="prompt"]')?.innerText || "",
-            video: tr.querySelector('[data-col="video"]')?.value || ""
+            prompt: tr.querySelector('[data-col="prompt"]')?.value || "",
+            video: ""
         });
-    });
+    }
 
     if (rows.length === 0) {
         showToast('表格数据为空', 'error');
@@ -849,13 +932,16 @@ window.saveToExcel = function() {
             sheet_name: sheetName,
             rows: rows
         })
-    }).then(res => res.json()).then(res => {
+    })
+    .then(res => res.json())
+    .then(res => {
         if (res.status === 'success') {
             showToast(res.msg, 'success');
         } else {
             showToast(res.msg, 'error');
         }
-    }).catch(err => {
+    })
+    .catch(err => {
         showToast('保存失败：网络错误', 'error');
     });
 };
@@ -871,36 +957,11 @@ document.addEventListener('keydown', function(e) {
     if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
     const step = e.shiftKey ? 0.02 : 0.1;
 
-    if (e.key === 'g' || e.key === 'G') {
-        e.preventDefault();
-        adjustWidth(-step);
-    }
-    if (e.key === 'h' || e.key === 'H') {
-        e.preventDefault();
-        adjustWidth(step);
-    }
-    if (e.key === 'y' || e.key === 'Y') {
-        e.preventDefault();
-        adjustHeight(-step);
-    }
-    if (e.key === 'u' || e.key === 'U') {
-        e.preventDefault();
-        adjustHeight(step);
-    }
-    if (e.key === 'r' || e.key === 'R') {
-        e.preventDefault();
-        resetLayoutScale();
-    }
-    if (e.key === 'a' || e.key === 'A') {
-        e.preventDefault();
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('上一场'));
-        if (btn) btn.click();
-    }
-    if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('下一场'));
-        if (btn) btn.click();
-    }
+    if (e.key === 'g' || e.key === 'G') { e.preventDefault(); adjustWidth(-step); }
+    if (e.key === 'h' || e.key === 'H') { e.preventDefault(); adjustWidth(step); }
+    if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); adjustHeight(-step); }
+    if (e.key === 'u' || e.key === 'U') { e.preventDefault(); adjustHeight(step); }
+    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); resetLayoutScale(); }
 });
 
 document.addEventListener('wheel', function(e) {
@@ -921,19 +982,33 @@ setTimeout(applyScales, 500);
 # ==============================
 class StoryboardApp:
     def __init__(self):
-        self.excel_b_path, self.asset_dir, self.video_dir = "", "", ""
+        self.excel_b_path, self.asset_dir, self.video_dir, self.audio_dir = "", "", "", ""
         self.image_index = {}
+        self.image_conflicts = []
         self.audio_index = {}
+        self.audio_conflicts = []
         self.video_paths = []
         self.b_sheets, self.current_sheet_b = [], ""
 
-    def load_project(self, path_a, path_b, asset_p, video_p, current_sheet_val):
-        save_config(path_a, path_b, asset_p, video_p)
+    def load_project(self, path_a, path_b, asset_p, video_p, audio_p, current_sheet_val):
+        save_config(path_a, path_b, asset_p, video_p, audio_p)
         self.excel_b_path = clean_path(path_b)
         self.asset_dir = clean_path(asset_p)
         self.video_dir = clean_path(video_p)
-        self.image_index = build_image_index(self.asset_dir)
-        self.audio_index = build_audio_index(self.asset_dir)
+        self.audio_dir = clean_path(audio_p)
+
+        self.image_index, self.image_conflicts = build_image_index(self.asset_dir)
+        
+        # 音频目录优先级
+        target_audio_dir = self.audio_dir
+        if not target_audio_dir:
+            sub_audio = os.path.join(self.asset_dir, "Audio")
+            if os.path.isdir(sub_audio):
+                target_audio_dir = sub_audio
+            else:
+                target_audio_dir = self.asset_dir
+        self.audio_index, self.audio_conflicts = build_audio_index(target_audio_dir)
+
         target_video_dir = self.video_dir if self.video_dir else self.asset_dir
         self.video_paths = build_video_list(target_video_dir)
 
@@ -948,6 +1023,14 @@ class StoryboardApp:
             except Exception as e:
                 gr.Warning(f"读取分镜表失败: {e}")
         return gr.update(choices=sheet_choices, value=default_sheet)
+
+    def get_conflict_html(self):
+        items = []
+        if self.image_conflicts:
+            items.append(f"<span class='conflict-item'>📷 图片冲突：{'<br>'.join(self.image_conflicts)}</span>")
+        if self.audio_conflicts:
+            items.append(f"<span class='conflict-item'>🔊 音频冲突：{'<br>'.join(self.audio_conflicts)}</span>")
+        return f"<div class='conflict-panel'>{''.join(items)}</div>"
 
     def load_sheet_b_content(self, sheet_name):
         if not self.excel_b_path or not os.path.exists(self.excel_b_path) or not sheet_name:
@@ -971,31 +1054,34 @@ init_conf = load_config()
 # ==============================
 # 6. UI 页面构建
 # ==============================
-with gr.Blocks(title="AI 影视分镜助手") as demo:
+with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     with gr.Row():
         txt_path_a = gr.Textbox(label="表格 A (资产表)", value=init_conf.get("path_a", ""), lines=1, max_lines=1, scale=2)
         txt_path_b = gr.Textbox(label="表格 B (分镜表)", value=init_conf.get("path_b", ""), lines=1, max_lines=1, scale=2)
         txt_asset_dir = gr.Textbox(label="资产目录", value=init_conf.get("asset_dir", ""), lines=1, max_lines=1, scale=2)
-        txt_video_dir = gr.Textbox(label="视频目录", value=init_conf.get("video_dir", ""), lines=1, max_lines=1, scale=2, placeholder="不填默认同资产目录")
+        txt_audio_dir = gr.Textbox(label="音频目录", value=init_conf.get("audio_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认资产目录/Audio")
+        txt_video_dir = gr.Textbox(label="视频目录", value=init_conf.get("video_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认同资产目录")
         btn_load_project = gr.Button("🚀 加载/刷新工程", variant="primary", scale=1)
 
     with gr.Tabs():
         with gr.TabItem("📋 表格 B · 影视分镜表"):
+            # 冲突提示区
+            conflict_panel = gr.HTML('<div class="conflict-panel"></div>')
 
-            # 第一行：场次 + 隐藏列 + 上下场按钮
+            # 第一行：场次 + 隐藏列 + 上下场
             with gr.Row(elem_classes="top-toolbar-row"):
                 dd_sheets_b = gr.Dropdown(label="当前场次", choices=[], interactive=True, scale=2)
                 with gr.Column(scale=3, elem_classes="col-checkbox-wrap"):
                     chk_cols = gr.CheckboxGroup(
-                        choices=["镜头号", "小标题", "时长", "图片资产", "声音资产", "提示词", "视频结果"],
-                        value=["镜头号", "小标题", "时长", "图片资产", "声音资产", "提示词", "视频结果"],
+                        choices=["镜头号", "小标题", "音频结果/镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
+                        value=["镜头号", "小标题", "音频结果/镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
                         label="✓ 隐藏/显示列",
                         scale=0
                     )
                 btn_prev_sheet = gr.Button("◀ 上一场", scale=0, min_width=60)
                 btn_next_sheet = gr.Button("下一场 ▶", scale=0, min_width=60)
 
-            # 第二行：视图微调 横向平铺
+            # 第二行：视图微调
             with gr.Row(elem_classes="view-toolbar-row"):
                 gr.Markdown("**📐 视图微调**", scale=0)
                 btn_w_dec = gr.Button("◀ 栏宽收窄", scale=1)
@@ -1013,9 +1099,7 @@ with gr.Blocks(title="AI 影视分镜助手") as demo:
 
             html_storyboard_view = gr.HTML("<div class='empty-tip'>等待加载工程数据...</div>")
 
-    # ==============================
     # 事件绑定
-    # ==============================
     btn_w_dec.click(None, None, None, js="adjustWidth(-0.1)")
     btn_w_inc.click(None, None, None, js="adjustWidth(0.1)")
     btn_h_dec.click(None, None, None, js="adjustHeight(-0.1)")
@@ -1026,7 +1110,17 @@ with gr.Blocks(title="AI 影视分镜助手") as demo:
 
     chk_cols.change(None, inputs=[chk_cols], js="(cols) => { applyColVisibility(cols); }")
 
-    btn_load_project.click(fn=app_core.load_project, inputs=[txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, dd_sheets_b], outputs=[dd_sheets_b])
+    def load_and_refresh(path_a, path_b, asset_p, video_p, audio_p, cur_sheet):
+        sheet_update = app_core.load_project(path_a, path_b, asset_p, video_p, audio_p, cur_sheet)
+        conflict_html = app_core.get_conflict_html()
+        return sheet_update, conflict_html
+
+    btn_load_project.click(
+        fn=load_and_refresh,
+        inputs=[txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir, dd_sheets_b],
+        outputs=[dd_sheets_b, conflict_panel]
+    )
+
     dd_sheets_b.change(fn=app_core.load_sheet_b_content, inputs=[dd_sheets_b], outputs=[html_storyboard_view])
     btn_prev_sheet.click(fn=lambda cur: app_core.step_sheet(-1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
     btn_next_sheet.click(fn=lambda cur: app_core.step_sheet(1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
@@ -1061,12 +1155,11 @@ def save_excel_api(req: SaveExcelRequest):
             r = idx + 2
             ws.cell(row=r, column=1, value=row_data.get('shot', ''))
             ws.cell(row=r, column=2, value=row_data.get('title', ''))
-            try: ws.cell(row=r, column=3, value=float(row_data.get('dur', 0)))
-            except: pass
-            ws.cell(row=r, column=4, value=row_data.get('img', ''))
-            ws.cell(row=r, column=5, value=row_data.get('audio', ''))
+            ws.cell(row=r, column=3, value=row_data.get('dur', ''))
+            ws.cell(row=r, column=4, value=row_data.get('dialogue', ''))
+            ws.cell(row=r, column=5, value=row_data.get('img', ''))
             ws.cell(row=r, column=6, value=row_data.get('prompt', ''))
-            ws.cell(row=r, column=7, value=row_data.get('video', ''))
+            ws.cell(row=r, column=7, value='')
         wb.save(app_core.excel_b_path)
         filename = os.path.basename(app_core.excel_b_path)
         return {"status": "success", "msg": f"✅ 已保存到 {filename}"}
