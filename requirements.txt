@@ -1,3 +1,17 @@
+# ============================================================
+#  StoryBoardStudio 运行依赖
+#
+#  默认走清华 PyPI 镜像，国内安装快很多。
+#  海外网络、或镜像临时抽风时：把下面那行 --index-url 删掉即可，
+#  删掉后 pip 会自动回到官方源 https://pypi.org/simple
+#
+#  其他可选镜像（换着用）：
+#    阿里云   --index-url https://mirrors.aliyun.com/pypi/simple/
+#    腾讯云   --index-url https://mirrors.cloud.tencent.com/pypi/simple/
+#    中科大   --index-url https://pypi.mirrors.ustc.edu.cn/simple/
+# ============================================================
+--index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
 gradio>=4.20.0
 pandas>=2.0.0
 openpyxl>=3.1.2

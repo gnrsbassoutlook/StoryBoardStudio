@@ -16,6 +16,9 @@ from pydantic import BaseModel
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+# 第一部分（资产表预览）—— 独立模块，不改动下方第二部分任何逻辑
+from asset_tab import ASSET_CSS, ASSET_JS, build_asset_tab, register_asset_api
+
 # ==============================
 # 0. 本地配置持久化
 # ==============================
@@ -130,16 +133,27 @@ def find_matching_video(shot_id: str, video_paths: list):
             return path
     return None
 
-def backup_excel(filepath: str):
+def backup_excel(filepath: str, asset_dir: str = ""):
+    """保存写回前先备份原 Excel。
+
+    备份位置：**资产目录/excel_backup/**（用户口径：Excel 与它的历史版本归一堆，好找）。
+    资产目录没填 / 不存在时，退回老位置 —— Excel 同目录的 `_backups/`。
+    返回备份文件路径；文件不存在时返回空串。
+    """
     if not os.path.exists(filepath):
-        return
-    backup_dir = os.path.join(os.path.dirname(filepath), "_backups")
+        return ""
+    base = clean_path(asset_dir) if asset_dir else ""
+    if base and os.path.isdir(base):
+        backup_dir = os.path.join(base, "excel_backup")
+    else:
+        backup_dir = os.path.join(os.path.dirname(filepath), "_backups")
     os.makedirs(backup_dir, exist_ok=True)
     basename = os.path.basename(filepath)
     name, ext = os.path.splitext(basename)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = os.path.join(backup_dir, f"{name}_{timestamp}{ext}")
     shutil.copy2(filepath, backup_path)
+    return backup_path
 
 # ==============================
 # 2. 核心表格渲染引擎（D/E列互换）
@@ -488,8 +502,8 @@ CUSTOM_CSS = """
     resize: vertical;
     width: 100%;
     box-sizing: border-box;
-    min-height: 70px;
-    max-height: 110px;
+    min-height: 104px;
+    max-height: 144px;
     font-family: inherit;
 }
 
@@ -700,7 +714,7 @@ CUSTOM_CSS = """
 }
 
 .area-title {
-    height: 70px;
+    height: 106px;
     resize: vertical;
     font-size: 13px !important;
     color: #f4f6fa !important;
@@ -715,8 +729,8 @@ CUSTOM_CSS = """
     padding: 6px;
     border-radius: 4px;
     resize: vertical;
-    min-height: 90px;
-    max-height: 130px;
+    min-height: 126px;
+    max-height: 166px;
     overflow-y: auto;
     overflow-x: hidden;
     font-size: 12px;
@@ -952,16 +966,62 @@ window.pauseOtherVideos = function(currentVideo) {
     });
 };
 
+/* 全局快捷键（键盘上一排 a s d f g h，另加 r）
+     a / s → 切「当前这张表」的上一个 / 下一个 sheet
+             （表格 A = 上一表 / 下一表，表格 B = 上一场 / 下一场）
+     d / f → 切 Tab 页面（d → 表格 A，f → 表格 B）
+     g / h → 横向缩放；Shift+g / Shift+h → 纵向缩放；r → 恢复默认排版
+   —— 只在「当前可见的那一部分」上生效，且焦点在输入框里时不拦截（方便打字）*/
 document.addEventListener('keydown', function(e) {
-    const activeTag = document.activeElement.tagName;
+    const el = document.activeElement;
+    const activeTag = el ? el.tagName : '';
     if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
-    const step = e.shiftKey ? 0.02 : 0.1;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
 
-    if (e.key === 'g' || e.key === 'G') { e.preventDefault(); adjustWidth(-step); }
-    if (e.key === 'h' || e.key === 'H') { e.preventDefault(); adjustWidth(step); }
-    if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); adjustHeight(-step); }
-    if (e.key === 'u' || e.key === 'U') { e.preventDefault(); adjustHeight(step); }
-    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); resetLayoutScale(); }
+    const key = e.key || '';
+    const lower = key.toLowerCase();
+
+    // a / s ：切 sheet（本表内翻页，等价于点「上一表 / 下一表」或「上一场 / 下一场」）
+    if (lower === 'a' || lower === 's') {
+        e.preventDefault();
+        if (window.sbsStepSheet) sbsStepSheet(lower === 'a' ? -1 : 1);
+        return;
+    }
+
+    // d / f ：切 Tab 页面（表格 A ↔ 表格 B）
+    if (lower === 'd' || lower === 'f') {
+        e.preventDefault();
+        if (window.sbsSwitchTab) sbsSwitchTab(lower === 'd' ? 'A' : 'B');
+        return;
+    }
+
+    // g / h ：横向缩放；按住 Shift（key 变大写）→ 纵向缩放
+    if (lower === 'g' || lower === 'h') {
+        // 判定纵向缩放必须用 shiftKey：Safari 下按 Shift+h，e.key 依旧是小写 'h'，
+        // 靠大写字母判定会失效（Caps Lock 开着时还会误判，所以只认 shiftKey）。
+        const vertical = !!e.shiftKey;
+        const grow = (lower === 'h');
+        const step = 0.1;
+        e.preventDefault();
+        const vpA = document.getElementById('assetViewport');
+        const inPartA = !!(vpA && vpA.offsetParent !== null);
+        if (inPartA) {
+            if (vertical) aAdjustHeight(grow ? step : -step);
+            else aAdjustWidth(grow ? step : -step);
+        } else {
+            if (vertical) adjustHeight(grow ? step : -step);
+            else adjustWidth(grow ? step : -step);
+        }
+        return;
+    }
+
+    // r ：恢复默认排版（对当前所在的部分生效）
+    if (lower === 'r') {
+        e.preventDefault();
+        const vpA = document.getElementById('assetViewport');
+        const inPartA = !!(vpA && vpA.offsetParent !== null);
+        if (inPartA) aResetScale(); else resetLayoutScale();
+    }
 });
 
 document.addEventListener('wheel', function(e) {
@@ -976,6 +1036,10 @@ document.addEventListener('wheel', function(e) {
 
 setTimeout(applyScales, 500);
 """
+
+# 追加第一部分（资产表）的样式与脚本：只做字符串拼接，原有内容原封不动
+CUSTOM_CSS = CUSTOM_CSS + ASSET_CSS
+CUSTOM_JS = CUSTOM_JS + ASSET_JS
 
 # ==============================
 # 5. 后端控制器
@@ -1016,7 +1080,8 @@ class StoryboardApp:
         if os.path.exists(self.excel_b_path):
             try:
                 wb = openpyxl.load_workbook(self.excel_b_path, read_only=True)
-                self.b_sheets = sorted(wb.sheetnames, key=natural_sort_key)
+                # 严格按源文件里 sheet 的原有顺序（改名也照样排第一位）
+                self.b_sheets = list(wb.sheetnames)
                 sheet_choices = self.b_sheets
                 default_sheet = current_sheet_val if current_sheet_val in sheet_choices else (self.b_sheets[0] if self.b_sheets else None)
                 self.current_sheet_b = default_sheet
@@ -1064,6 +1129,9 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
         btn_load_project = gr.Button("🚀 加载/刷新工程", variant="primary", scale=1)
 
     with gr.Tabs():
+
+        # ===== 第一部分：影视资产表（X/Y/Z 预览 + 听声）=====
+        build_asset_tab(txt_path_a, txt_asset_dir, txt_audio_dir, btn_load_project)
         with gr.TabItem("📋 表格 B · 影视分镜表"):
             # 冲突提示区
             conflict_panel = gr.HTML('<div class="conflict-panel"></div>')
@@ -1131,6 +1199,8 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
 # 7. FastAPI 接口
 # ==============================
 fastapi_app = FastAPI()
+# 第一部分（资产表）的保存接口 —— 实现放在 asset_tab.py，这里只注册
+register_asset_api(fastapi_app)
 
 class SaveExcelRequest(BaseModel):
     sheet_name: str
@@ -1147,7 +1217,8 @@ def save_excel_api(req: SaveExcelRequest):
         if not sheet_name or not rows:
             return {"status": "error", "msg": "保存失败：数据不完整"}
 
-        backup_excel(app_core.excel_b_path)
+        # 备份到「资产目录/excel_backup/」（资产目录没填时退回 Excel 同目录 _backups/）
+        backup_path = backup_excel(app_core.excel_b_path, app_core.asset_dir)
 
         wb = openpyxl.load_workbook(app_core.excel_b_path)
         ws = wb[sheet_name]
@@ -1162,6 +1233,9 @@ def save_excel_api(req: SaveExcelRequest):
             ws.cell(row=r, column=7, value='')
         wb.save(app_core.excel_b_path)
         filename = os.path.basename(app_core.excel_b_path)
+        if backup_path:
+            return {"status": "success",
+                    "msg": f"✅ 已保存 {filename}｜备份：{os.path.basename(backup_path)}"}
         return {"status": "success", "msg": f"✅ 已保存到 {filename}"}
 
     except PermissionError:
@@ -1198,6 +1272,30 @@ def serve_local_media(filepath: str):
 
 app = gr.mount_gradio_app(fastapi_app, demo, path="/", css=CUSTOM_CSS, js=CUSTOM_JS)
 
+def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
+    """启动前自检：端口被占，说明同款程序已经在跑了，不必再起一个。"""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return False
+        except OSError:
+            return True
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7861)
+
+    PORT = 7861
+    if _port_in_use(PORT):
+        # 这不是故障，只是「重复启动」。给人话，别丢 errno 让人心慌。
+        print("\n" + "=" * 58)
+        print("  ⚠️  端口 7861 已被占用：StoryBoardStudio 应该已经在运行了")
+        print("     直接打开浏览器 →  http://localhost:7861")
+        print("     确实要重启的话，先在原窗口按 Ctrl+C，或执行：")
+        print("         pkill -f StoryBoardStudio.py")
+        print("=" * 58 + "\n")
+        raise SystemExit(1)
+
+    print(f"▶ StoryBoardStudio 已启动 → http://localhost:{PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

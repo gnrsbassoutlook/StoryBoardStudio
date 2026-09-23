@@ -1,0 +1,24 @@
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*.pyc.*
+*.pyo
+*.egg-info/
+
+# ============ 虚拟环境 ============
+venv/
+.venv/
+# 启动脚本检测到「跨机器拷来的不可用 venv」时会改名留档成 venv_broken_<时间戳>/rdm
+venv_broken_*/
+
+# ============ 运行 / 备份产物 ============
+# _backups/ 存两样东西：改代码前的 .py 快照、以及「资产目录未填」时的 Excel 备份回退
+_backups/
+gradio_temp/config.json.bak_*
+# 正常备份位置在 <资产目录>/excel_backup/，那个目录在仓库外
+
+# ============ macOS ============
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
