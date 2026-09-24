@@ -1,43 +1,24 @@
-#!/bin/zsh
-# StoryBoardStudio Mac 更新脚本，查看最近20条提交再确认更新
-cd "$(dirname "$0")"
-echo "=========================================="
-echo " 🔄 StoryBoardStudio GitHub 自动更新脚本"
-echo "=========================================="
+#!/bin/bash
+# StoryBoardStudio macOS 更新脚本
+# 交互式更新：本地已是最新就直接提示；否则列出远程最近 20 个提交，
+# 输入序号（回车 = 最新版）选择要部署到本地的版本。
+# 具体逻辑都在 sbs_update.py 里，与 Windows 版共用同一份实现。
+cd "$(dirname "$0")" || exit 1
 
-if [ ! -d ".git" ]; then
-    echo "❌ 当前目录尚未关联 Git 仓库，请先执行 git clone。"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ 未检测到 python3，无法执行更新，请先安装 Python 3.10+。"
     read -n 1 -s -r -p "按任意键退出..."
+    echo ""
     exit 1
 fi
 
-echo ""
-echo "==================== 本地最近20个提交记录 ===================="
-git log --pretty=format:"%h | %ad | %s" --date=short -n 20
-echo "=============================================================="
-echo ""
-echo "当前本地 commit: $(git rev-parse --short HEAD)"
-echo ""
-
-read -n 1 -s -r -p "⚠️ 按任意键确认，开始拉取远程最新代码..."
-echo ""
-echo "⏳ 正在从远程仓库拉取最新代码..."
-git pull origin main
+python3 sbs_update.py
 RET=$?
 
-if [ $RET -eq 0 ]; then
-    echo ""
-    echo "🎉 更新成功！代码已是最新版本。"
-    echo "👉 更新后 commit: $(git rev-parse --short HEAD)"
-    if [ -f "requirements.txt" ]; then
-        echo "📦 正在检查并更新依赖包..."
-        pip3 install -r requirements.txt -q
-    fi
-else
-    echo ""
-    echo "❌ 更新失败，请检查网络或是否存在本地文件冲突！"
+echo ""
+if [ $RET -ne 0 ]; then
+    echo "ℹ️  本次没有更新（返回码 $RET）—— 主动取消或出错都会这样，上面的提示是原因。"
 fi
-
+read -n 1 -s -r -p "按任意键关闭窗口..."
 echo ""
-read -n 1 -s -r -p "按任意键退出窗口..."
-echo ""
+exit $RET

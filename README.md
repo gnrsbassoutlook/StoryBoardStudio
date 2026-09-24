@@ -151,11 +151,12 @@ StoryBoardStudio/
 ├── .gitignore                   # 忽略规则（venv / __pycache__ / _backups / .DS_Store …）
 │
 ├── launch_sbs_mac.command       # 🍎 macOS 一键启动（建 venv → 装依赖 → 起服务 → 开浏览器）
-├── update-sbs.command           # 🍎 macOS 拉取最新代码（先列最近 20 条提交，确认后再拉）
+├── update-sbs.command           # 🍎 macOS 更新（薄壳，转调 sbs_update.py）
 ├── push-sbs.command             # 🍎 macOS 提交并推送到 GitHub
 ├── launch_sbs_win.bat           # 🪟 Windows 一键启动
-├── update-sbs_win.bat           # 🪟 Windows 拉取最新代码
+├── update-sbs_win.bat           # 🪟 Windows 更新（薄壳，转调 sbs_update.py）
 ├── push-sbs_win.bat             # 🪟 Windows 提交并推送
+├── sbs_update.py                # ★ 交互式更新器本体（Mac / Win 共用，列 20 条提交选版本）
 │
 ├── gradio_temp/                 # Gradio 本地运行目录
 │   └── config.json              # ★ 本地配置（见下方「配置文件」）
@@ -311,11 +312,24 @@ venv/                            # 虚拟环境（首次运行本机自动创建
 **macOS**
 
 ```bash
-./update-sbs.command    # 拉取远程最新代码（会先列出最近 20 条提交让你确认）
+./update-sbs.command    # 交互式更新（见下方说明）
 ./push-sbs.command      # 提交并推送（工作区干净时会直接退出，不会产生空提交）
 ```
 
 **Windows**：直接双击 `update-sbs_win.bat` / `push-sbs_win.bat`（或在 `cmd` 里运行同样名字）。
+
+### 更新器怎么用
+
+两个平台的更新脚本都是薄壳，真正的交互逻辑在 `sbs_update.py` 里（Mac / Win 行为完全一致，也不会被 `cmd.exe` 的中文乱码问题波及）：
+
+1. 先连远程仓库，**本地已经是最新就直接提示「本地已是最新版本」，什么都不改就退出**；
+2. 不是最新时，列出远程最近 **20 条提交**，每条带短 SHA、日期、提交信息，并标出「← 你现在的版本」；
+3. 输入序号 `1`–`20` 选择要部署到本地的版本，**直接回车 = 1（最新版）**，输入 `q` 取消；输入别的会提示重新输入，不会退出；
+4. 切换前若工作区有未提交改动，会自动 `git stash` 留档，并在结束时打印 `git stash pop` 的取回方法；
+5. 若本地存在「不在远程上的提交」，会额外确认一次，避免把本地提交冲掉（`reset --hard` 不删数据，它们仍在 `git reflog` 里）；
+6. 万一选中的是还没有 `sbs_update.py` 的早期版本，脚本会把运行器本体写回磁盘，不会让你失去启动 / 更新入口。
+
+脚本只移动 git 指针，**不删任何文件**。想回到最新版：再跑一次，直接回车即可。
 
 推送默认走 SSH（`git@github.com:gnrsbassoutlook/StoryBoardStudio.git`），需要本机已配置 GitHub SSH 密钥；想换 HTTPS 就编辑脚本里注释掉的那两行 —— macOS 在 `push-sbs.command`，Windows 在 `push-sbs_win.bat`。
 

@@ -1,9 +1,12 @@
 import os
 import re
 import io
+import sys
 import json
 import shutil
+import asyncio
 import mimetypes
+import subprocess
 from datetime import datetime
 import urllib.parse
 import pandas as pd
@@ -48,11 +51,44 @@ def save_config(path_a, path_b, asset_dir, video_dir, audio_dir):
 # ==============================
 # 1. 资产索引与冲突检测（精准匹配X/Y/Z编码）
 # ==============================
+# 「复制文件地址」可能带上的引号：资源管理器给的是英文双引号，某些输入法 /
+# 聊天工具 / 文档里粘出来的是中文引号，这里一律剥掉。
+_QUOTE_CHARS = "\"'“”‘’「」『』"
+
+def _trim_sep(p: str) -> str:
+    """去掉路径尾部的分隔符（macOS 选文件夹会带 /），但保住盘符根目录与 / 。"""
+    if not p or p == "/" or re.match(r"^[A-Za-z]:[\\/]?$", p):
+        return p
+    return p.rstrip("/\\")
+
 def clean_path(path_str: str) -> str:
+    """把用户粘进来的路径洗成干净的绝对路径。
+
+    兼容这些「模糊输入」：
+      · 首尾空格、全角空格、BOM
+      · 被引号包裹 —— 资源管理器「复制文件地址」会给 "C:\\a\\b.xlsx" 套一对英文
+        双引号，中文引号 “ ” 和单引号 ' ' 同理；只粘到左引号（右引号被吃掉）也能处理
+      · 浏览器里复制来的 file:// 前缀
+      · 终端里拖文件产生的「反斜杠 + 空格」转义
+    """
     if not path_str:
         return ""
-    p = path_str.strip().strip("'").strip('"')
-    p = p.replace("\\ ", " ")
+    p = str(path_str).lstrip("\ufeff").replace("\u3000", " ").strip()
+    if p[:7].lower() == "file://":
+        p = urllib.parse.unquote(p[7:])
+        if re.match(r"^/[A-Za-z]:", p):        # file:///C:/x → C:/x
+            p = p[1:]
+    for _ in range(3):                          # 反复剥，兼容 外层"内层' 这种嵌套
+        p = p.strip().strip("\u200b")
+        if len(p) >= 2 and p[0] in _QUOTE_CHARS and p[-1] in _QUOTE_CHARS:
+            p = p[1:-1]
+        elif p and p[0] in _QUOTE_CHARS:        # 只粘到左引号的情况
+            p = p[1:]
+        else:
+            break
+    p = p.strip().replace("\\ ", " ")
+    if not p:
+        return ""
     return os.path.abspath(p)
 
 def natural_sort_key(s: str):
@@ -1042,6 +1078,117 @@ CUSTOM_CSS = CUSTOM_CSS + ASSET_CSS
 CUSTOM_JS = CUSTOM_JS + ASSET_JS
 
 # ==============================
+# 5.5 路径框右端的原生「浏览…」按钮
+# ==============================
+# Windows 版 Edge 不支持把文件拖成路径，所以给 5 个路径框各挂一个 📁 小按钮：
+# 点一下由服务端弹系统选择框，选完自动回填（依然支持手动粘地址）。
+# 按钮绝对定位在输入框右端，完全不占纵向空间。
+PATH_PICKER_CSS = """
+/* 路径框右端的「浏览…」小按钮：绝对定位覆盖在输入框右侧空白处 */
+.sbs-input-wrap { position: relative; }
+.sbs-input-wrap .sbs-pick-btn {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    margin: 0;
+    font-size: 13px;
+    line-height: 24px;
+    text-align: center;
+    color: #e5e9f0;
+    background: #343b4a;
+    border: 1px solid #4a5266;
+    border-radius: 5px;
+    cursor: pointer;
+    opacity: .85;
+    z-index: 4;
+}
+.sbs-input-wrap .sbs-pick-btn:hover { opacity: 1; background: #46506a; }
+.sbs-input-wrap .sbs-pick-btn:disabled { opacity: .45; cursor: default; }
+/* 给按钮让位，免得长路径钻到按钮底下 */
+.sbs-input-wrap input[data-testid="textbox"] { padding-right: 34px !important; }
+"""
+
+PATH_PICKER_JS = """
+/* ===== 原生「浏览…」按钮：把系统选择框选到的路径直接回填到输入框 ===== */
+(function () {
+    var TARGETS = [
+        { label: '表格 A (资产表)', kind: 'file', title: '选择表格 A（资产表）' },
+        { label: '表格 B (分镜表)', kind: 'file', title: '选择表格 B（分镜表）' },
+        { label: '资产目录', kind: 'dir', title: '选择资产目录' },
+        { label: '音频目录', kind: 'dir', title: '选择音频目录' },
+        { label: '视频目录', kind: 'dir', title: '选择视频目录' }
+    ];
+
+    function setInputValue(input, value) {
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function mountOne(cfg) {
+        var spans = document.querySelectorAll('span[data-testid="block-info"]');
+        for (var i = 0; i < spans.length; i++) {
+            var txt = (spans[i].textContent || '').trim();
+            if (txt.indexOf(cfg.label) !== 0) continue;          // 只认以标签名开头的那个
+            var blk = spans[i].closest('.block') || spans[i].parentElement;
+            if (!blk) return false;
+            var input = blk.querySelector('input[data-testid="textbox"]');
+            if (!input) return false;
+            var wrap = input.parentElement;
+            if (!wrap) return false;
+            if (wrap.querySelector('.sbs-pick-btn')) return true; // 已挂过，不重复
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'sbs-pick-btn';
+            btn.textContent = '📁';
+            btn.title = cfg.kind === 'dir' ? '浏览文件夹…' : '浏览文件…';
+            btn.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                btn.disabled = true;
+                btn.textContent = '⏳';
+                fetch('/api/pick_path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ kind: cfg.kind, title: cfg.title })
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (j) {
+                        if (j.status === 'ok' && j.path) {
+                            setInputValue(input, j.path);
+                            if (window.showToast) showToast('已填入：' + j.path, 'success');
+                        } else if (j.status === 'error' && window.showToast) {
+                            showToast(j.msg || '选择失败', 'error');
+                        }
+                    })
+                    .catch(function () {
+                        if (window.showToast) showToast('无法调用系统选择框，请手动粘贴路径', 'error');
+                    })
+                    .then(function () { btn.disabled = false; btn.textContent = '📁'; });
+            });
+            wrap.classList.add('sbs-input-wrap');
+            wrap.appendChild(btn);
+            return true;
+        }
+        return false;
+    }
+
+    function mountAll() { TARGETS.forEach(mountOne); }
+    window.sbsMountPathPickers = mountAll;
+    // Gradio 的 DOM 是异步渲染的：首屏补一次，之后低频轮询自愈（切 tab 重渲染也不会丢）
+    setTimeout(mountAll, 800);
+    setInterval(mountAll, 2500);
+})();
+"""
+
+CUSTOM_CSS = CUSTOM_CSS + PATH_PICKER_CSS
+CUSTOM_JS = CUSTOM_JS + PATH_PICKER_JS
+
+# ==============================
 # 5. 后端控制器
 # ==============================
 class StoryboardApp:
@@ -1126,7 +1273,7 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
         txt_asset_dir = gr.Textbox(label="资产目录", value=init_conf.get("asset_dir", ""), lines=1, max_lines=1, scale=2)
         txt_audio_dir = gr.Textbox(label="音频目录", value=init_conf.get("audio_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认资产目录/Audio")
         txt_video_dir = gr.Textbox(label="视频目录", value=init_conf.get("video_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认同资产目录")
-        btn_load_project = gr.Button("🚀 加载/刷新工程", variant="primary", scale=1)
+        btn_load_project = gr.Button("🚀 加载/刷新工程", variant="primary", scale=0, size="sm", min_width=104)
 
     with gr.Tabs():
 
@@ -1201,6 +1348,92 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
 fastapi_app = FastAPI()
 # 第一部分（资产表）的保存接口 —— 实现放在 asset_tab.py，这里只注册
 register_asset_api(fastapi_app)
+
+
+# ---- 原生「浏览…」选择框 ----------------------------------------------------
+# SBS 跑在本机，浏览器和服务端是同一台机器，所以文件/文件夹选择框可以直接由
+# 服务端弹出（Windows 版 Edge 不支持把文件拖成路径，靠它就不用手敲地址了）。
+def _pick_path_native(kind: str, title: str) -> str:
+    """弹出系统原生选择框，返回绝对路径。
+
+    用户取消 → 返回 ""；系统不支持或调用出错 → 抛 RuntimeError（前端会红字提示）。
+    """
+    title = (title or ("选择文件夹" if kind == "dir" else "选择文件"))
+    # 标题只作提示，清掉会破坏脚本字符串字面量的字符
+    title = title.replace('"', " ").replace("\\", " ").replace("'", " ")
+
+    # ---------- macOS ----------
+    if sys.platform == "darwin":
+        verb = "choose folder" if kind == "dir" else "choose file"
+        script = ("try\n"
+                  f'    set t to {verb} with prompt "{title}"\n'
+                  "    return POSIX path of t\n"
+                  "on error number -128\n"          # -128 = 用户点了取消
+                  '    return ""\n'
+                  "end try")
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=600)
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        if r.returncode != 0 and err and "cancel" not in err.lower():
+            raise RuntimeError(err.splitlines()[-1] if err else "osascript 调用失败")
+        return _trim_sep((r.stdout or b"").decode("utf-8", "replace").strip())
+
+    # ---------- Windows ----------
+    if os.name == "nt":
+        exe = shutil.which("powershell") or shutil.which("pwsh")
+        if not exe:
+            raise RuntimeError("未找到 powershell，请手动粘贴路径")
+        if kind == "dir":
+            pick = ("$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                    f"$d.Description = '{title}';"
+                    "$d.ShowNewFolderButton = $true;"
+                    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)"
+                    " { [Console]::Out.Write($d.SelectedPath) }")
+        else:
+            pick = ("$d = New-Object System.Windows.Forms.OpenFileDialog;"
+                    f"$d.Title = '{title}';"
+                    "$d.Filter = 'All files (*.*)|*.*';"
+                    "$d.CheckFileExists = $true; $d.RestoreDirectory = $true;"
+                    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK)"
+                    " { [Console]::Out.Write($d.FileName) }")
+        # [Console]::OutputEncoding 设成 UTF-8，中文路径才不会在回读时变乱码
+        ps = ("Add-Type -AssemblyName System.Windows.Forms;"
+              "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;" + pick)
+        r = subprocess.run(
+            [exe, "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            capture_output=True, timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),   # 不闪黑框
+        )
+        return _trim_sep((r.stdout or b"").decode("utf-8", "replace").lstrip("\ufeff").strip())
+
+    # ---------- Linux ----------
+    if shutil.which("zenity"):
+        args = ["zenity", "--file-selection", f"--title={title}"]
+        if kind == "dir":
+            args.append("--directory")
+        r = subprocess.run(args, capture_output=True, timeout=600)
+        if r.returncode != 0:                       # 取消
+            return ""
+        return _trim_sep((r.stdout or b"").decode("utf-8", "replace").strip())
+    raise RuntimeError("当前系统没有 zenity，请手动粘贴路径")
+
+
+class PickPathRequest(BaseModel):
+    kind: str = "file"          # "file" 选文件 / "dir" 选文件夹
+    title: str = ""
+
+
+@fastapi_app.post("/api/pick_path")
+async def pick_path_api(req: PickPathRequest):
+    """弹出系统原生选择框。取消返回 status=cancel（前端静默处理）。"""
+    try:
+        # 选择框会一直阻塞到用户选完，扔到线程里跑，免得把整个服务卡住
+        picked = await asyncio.to_thread(_pick_path_native, req.kind, req.title)
+    except Exception as e:                                   # noqa: BLE001
+        return {"status": "error", "msg": f"调用系统选择框失败：{e}"}
+    if not picked:
+        return {"status": "cancel", "msg": "已取消选择"}
+    return {"status": "ok", "path": picked}
+
 
 class SaveExcelRequest(BaseModel):
     sheet_name: str

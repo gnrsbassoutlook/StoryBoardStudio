@@ -3,47 +3,25 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo =================================================
-echo   StoryBoardStudio GitHub 更新脚本 (Windows)
+echo   StoryBoardStudio updater (Windows)
 echo =================================================
-
-if not exist ".git" (
-    echo [X] 当前目录尚未关联 Git 仓库，请先 git clone。
-    pause
-    exit /b 1
-)
-
-echo.
-echo ==================== 本地最近20个提交记录 ====================
-git log --oneline -n 20
-echo.
-echo ==============================================================
-echo.
-for /f "delims=" %%i in ('git rev-parse --short HEAD') do echo 当前本地 commit: %%i
 echo.
 
-pause
-echo [*] 正在从远程仓库拉取最新代码...
-git pull origin main
+REM NOTE: this file must stay pure ASCII (cmd.exe mis-parses UTF-8 .bat files).
+REM All interactive logic lives in sbs_update.py so that macOS and Windows behave
+REM exactly the same, and so Chinese messages never get mangled by cmd.exe.
+
+where python >nul 2>nul
 if errorlevel 1 (
-    echo.
-    echo [X] 更新失败，请检查网络或是否存在本地文件冲突！
+    echo [X] Python not found. Please install Python 3.10+ first.
+    echo     Download: https://www.python.org/downloads/windows/
+    echo     During setup, tick "Add Python to PATH".
     pause
     exit /b 1
 )
 
-echo.
-echo [*] 更新成功！代码已是最新版本。
-for /f "delims=" %%i in ('git rev-parse --short HEAD') do echo [*] 更新后 commit: %%i
-
-if exist "requirements.txt" (
-    echo [*] 正在检查并更新依赖包...
-    if exist "venv\Scripts\python.exe" (
-        call "venv\Scripts\activate.bat"
-        python -m pip install -q -r requirements.txt
-    ) else (
-        echo [!] 未发现 venv，跳过依赖更新（双击 launch_sbs_win.bat 会自动创建）。
-    )
-)
+python sbs_update.py
+if errorlevel 1 echo [!] The updater stopped with an error - see the messages above.
 
 echo.
 pause

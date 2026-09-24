@@ -109,10 +109,42 @@ def media_url(path: str) -> str:
     return MEDIA_URL.format(urllib.parse.quote(path))
 
 
+# 「复制文件地址」可能带上的引号：资源管理器给的是英文双引号，某些输入法 /
+# 聊天工具 / 文档里粘出来的是中文引号，这里一律剥掉。（与主程序保持同一份实现）
+_QUOTE_CHARS = "\"'“”‘’「」『』"
+
+
+def _trim_sep(p: str) -> str:
+    """去掉路径尾部的分隔符，但保住盘符根目录与 / 。"""
+    if not p or p == "/" or re.match(r"^[A-Za-z]:[\\/]?$", p):
+        return p
+    return p.rstrip("/\\")
+
+
 def clean_path(path_str: str) -> str:
+    """把用户粘进来的路径洗成干净的绝对路径。
+
+    兼容：首尾空格 / 全角空格 / BOM、被英文或中文引号包裹（含只粘到左引号）、
+    浏览器复制来的 file:// 前缀、终端拖拽产生的「反斜杠 + 空格」转义。
+    """
     if not path_str:
         return ""
-    p = str(path_str).strip().strip("'").strip('"').replace("\\ ", " ")
+    p = str(path_str).lstrip("\ufeff").replace("\u3000", " ").strip()
+    if p[:7].lower() == "file://":
+        p = urllib.parse.unquote(p[7:])
+        if re.match(r"^/[A-Za-z]:", p):        # file:///C:/x → C:/x
+            p = p[1:]
+    for _ in range(3):                          # 反复剥，兼容 外层"内层' 这种嵌套
+        p = p.strip().strip("\u200b")
+        if len(p) >= 2 and p[0] in _QUOTE_CHARS and p[-1] in _QUOTE_CHARS:
+            p = p[1:-1]
+        elif p and p[0] in _QUOTE_CHARS:        # 只粘到左引号的情况
+            p = p[1:]
+        else:
+            break
+    p = p.strip().replace("\\ ", " ")
+    if not p:
+        return ""
     return os.path.abspath(p)
 
 
