@@ -593,8 +593,8 @@ CUSTOM_CSS = """
     resize: vertical;
     width: 100%;
     box-sizing: border-box;
-    min-height: 104px;
-    max-height: 144px;
+    min-height: calc(104px * var(--row-scale));
+    max-height: calc(144px * var(--row-scale));
     font-family: inherit;
 }
 
@@ -762,7 +762,7 @@ CUSTOM_CSS = """
 }
 
 .video-empty {
-    height: 100px;
+    height: calc(100px * var(--row-scale));
     background: #0a0a0f;
     border: 1px solid #2e3440;
     border-radius: 4px;
@@ -805,7 +805,9 @@ CUSTOM_CSS = """
 }
 
 .area-title {
-    height: 106px;
+    /* 必须消费 --row-scale：Shift+g / Shift+h 只改这个变量，
+       不写进 calc 的话纵向缩放就是空操作 */
+    height: calc(106px * var(--row-scale));
     resize: vertical;
     font-size: 13px !important;
     color: #f4f6fa !important;
@@ -820,8 +822,8 @@ CUSTOM_CSS = """
     padding: 6px;
     border-radius: 4px;
     resize: vertical;
-    min-height: 126px;
-    max-height: 166px;
+    min-height: calc(126px * var(--row-scale));
+    max-height: calc(166px * var(--row-scale));
     overflow-y: auto;
     overflow-x: hidden;
     font-size: 12px;
@@ -874,8 +876,17 @@ window.adjustWidth = function(delta) {
     applyScales();
 };
 
+/* 三个文本框都开了 resize: vertical，手动拖高会留下内联 height，
+   它会盖住 CSS 里的 calc(... * var(--row-scale))，缩放就管不到这一格了。
+   所以纵向缩放 / 恢复默认之前先把内联高度清掉，让 CSS 重新接管。 */
+window.clearManualRowHeights = function() {
+    document.querySelectorAll('.storyboard-table .area-title, .storyboard-table .dialogue-input, .storyboard-table .prompt-box')
+        .forEach(function(el) { el.style.removeProperty('height'); });
+};
+
 window.adjustHeight = function(delta) {
     hScale = Math.max(0.6, Math.min(2.5, hScale + delta));
+    clearManualRowHeights();
     applyScales();
 };
 
@@ -890,6 +901,7 @@ window.resetLayoutScale = function() {
     hScale = 1.0;
     localStorage.removeItem('userColScale');
     localStorage.removeItem('userRowScale');
+    clearManualRowHeights();
     applyScales();
     showToast('已恢复默认排版', 'success');
 };

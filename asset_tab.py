@@ -702,16 +702,6 @@ ASSET_CSS = """
 }
 .a-warn { color: #f0a0a8; }
 .a-badcode-txt { color: #d08770; }
-.a-keycap {
-    display: inline-block;
-    padding: 0 4px;
-    border: 1px solid #4c566a;
-    border-radius: 3px;
-    background: #1d2129;
-    color: #d8dee9;
-    font-family: monospace;
-}
-
 .a-empty {
     padding: 28px 16px;
     text-align: center;
@@ -1262,24 +1252,8 @@ def build_asset_tab(txt_path_a, txt_asset_dir, txt_audio_dir, btn_load_project,
             btn_next_a = gr.Button("下一表 ▶", scale=0, min_width=60)
             html_stats_a = gr.HTML("<div class='a-hint'>等待加载…</div>", elem_classes="a-stats-box")
 
-        with gr.Row(elem_classes="a-legend-row"):
-            gr.HTML(
-                "<div class='a-hint'>"
-                "📷 图片预览、🔊 声音预览<b>固定在表格最右侧</b>，横向滚动始终可见；"
-                "点缩略图放大、点行在上方大字看整行文本；单元格可直接改，改完点"
-                "<b>💾 同步并保存到 Excel</b>写回源文件（写前自动备份）。<br>"
-                "⌨️ 快捷键（键盘上一排 <b>a s d f g h</b>）："
-                "<span class='a-keycap'>a</span>/<span class='a-keycap'>s</span> 上一个/下一个 <b>sheet</b>（本表内翻页）；"
-                "<span class='a-keycap'>d</span>/<span class='a-keycap'>f</span> 切到 <b>表格 A</b> / <b>表格 B</b>；"
-                "<span class='a-keycap'>g</span>/<span class='a-keycap'>h</span> 横向缩放；"
-                "<span class='a-keycap'>Shift</span>+<span class='a-keycap'>g</span>/"
-                "<span class='a-keycap'>h</span> 纵向缩放；"
-                "<span class='a-keycap'>r</span> 恢复默认（焦点不在输入框时生效）<br>"
-                "📐 命名硬规则：<b>X01</b>（X/Y/Z + 两位数字、后缀字母必须小写）"
-                "+ 英文句点 <code>.</code> + 描述，例 <code>X01a.何功伟狱中.png</code>；"
-                "其余写法一律<b>不参与匹配</b>。素材目录含子文件夹，递归扫描。"
-                "</div>"
-            )
+        # 说明文案（预览列吸附 / 快捷键 / 命名硬规则）已移到 README.md，
+        # 界面上不再占纵向空间；`.a-keycap` 样式随之弃用。
 
         with gr.Row(elem_classes="view-toolbar-row"):
             gr.Markdown("**📐 视图微调**", scale=0)
