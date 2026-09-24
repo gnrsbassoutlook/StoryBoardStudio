@@ -3,6 +3,7 @@ import re
 import io
 import sys
 import json
+import html
 import shutil
 import asyncio
 import mimetypes
@@ -169,6 +170,51 @@ def find_matching_video(shot_id: str, video_paths: list):
             return path
     return None
 
+# C列「严格代表时长」（模式2）的写法：12 / 12.5 / 12f / 12s（容忍数字与 f/s 之间多余空格）
+DURATION_PATTERN = re.compile(r'^\d+(\.\d+)?\s*[fFsS]?$')
+# 镜头号与描述之间的分隔符（口径与 find_matching_video 一致）
+_MATCH_SEPARATORS = {'.', '-', '_', ' '}
+
+def is_duration_value(text: str) -> bool:
+    """C列是否「严格代表时长」（模式2）。
+
+    只有纯数字、数字+f、数字+s 才算（数字可以是任意浮点数：12、2.8、12.75、0.5）。
+    `n/a`、`mode_1`、`mode_A`、`模式1` 这类模式1 的标记不是数字，不会被这里吃掉 ——
+    它们会原样显示在单元格里；也不会有任何值让界面报错。
+    """
+    return bool(DURATION_PATTERN.match((text or "").strip()))
+
+def format_duration_text(text: str) -> str:
+    """时长的显示文本：`8.0` 这种「整数被 Excel 存成浮点」的情况去掉尾巴，其余原样。
+
+    只影响界面显示，**不改动 Excel 里的值**（写回时用的仍是单元格原始内容）。
+    `2.8` 这类真小数不受影响。
+    """
+    s = (text or "").strip()
+    m = re.match(r'^(\d+)\.0+(\s*[fFsS]?)$', s)
+    return (m.group(1) + m.group(2)) if m else s
+
+def find_matching_audio(shot_id: str, audio_index: dict):
+    """按镜头号在音频索引里找音频文件，返回绝对路径；找不到返回空串。
+
+    `audio_index` 的键是「去掉扩展名的文件名 .upper()」（mp3/wav/flac/aac/m4a 都收录）。
+    两级匹配：
+      1. 精确：`s01-01.mp3` → 键 `S01-01`
+      2. 前缀模糊：`s01-01.何功伟的话.mp3` → 键以 `S01-01` + 分隔符 开头
+    多个模糊命中时按自然序取第一个，保证每次渲染结果稳定。
+    """
+    key = (shot_id or "").strip().upper()
+    if not key or key == "0" or not audio_index:
+        return ""
+    if key in audio_index:
+        return audio_index[key]
+    hits = [k for k in audio_index
+            if k.startswith(key) and len(k) > len(key) and k[len(key)] in _MATCH_SEPARATORS]
+    if hits:
+        hits.sort(key=natural_sort_key)
+        return audio_index[hits[0]]
+    return ""
+
 def backup_excel(filepath: str, asset_dir: str = ""):
     """保存写回前先备份原 Excel。
 
@@ -205,34 +251,43 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         title = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
         
         # C列：双模式兼容
+        #  · 纯数字 / 数字+f / 数字+s → 严格视为「时长」（模式2），只显示数字本身，不找音频
+        #  · n/a、mode_1、模式1 等     → 模式1 的标记，原样显示，不当时长解析
+        #  · 其余（通常是镜头号）       → 模式1，原样显示，并按镜头号模糊匹配音频挂播放条
         c_content = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
         c_content_strip = c_content.strip()
         
         c_cell_top = ""
-        if re.match(r'^\d+(\.\d+)?$', c_content_strip):
+        if is_duration_value(c_content_strip):
             c_cell_top = f"""
             <div class="dur-text">
-                <span class="dur-value">{c_content_strip}</span>
+                <span class="dur-value">{html.escape(format_duration_text(c_content_strip))}</span>
             </div>"""
         else:
-            code_upper = c_content_strip.upper()
-            if code_upper and code_upper != '0' and code_upper in audio_index:
-                file_url = f"/api/local_media?filepath={urllib.parse.quote(audio_index[code_upper])}"
+            # 模式1：匹配候选 C 列自身优先（常直接填镜头号），A 列镜头号兜底（填 n/a 等标记时）
+            audio_path = ""
+            for candidate in (c_content_strip, shot_id):
+                audio_path = find_matching_audio(candidate, audio_index)
+                if audio_path:
+                    break
+            if audio_path:
+                file_url = f"/api/local_media?filepath={urllib.parse.quote(audio_path)}"
+                badge_text = html.escape(c_content_strip or shot_id)
                 c_cell_top = f"""
                 <div class="audio-card single-audio">
-                    <span class="asset-badge-audio">{c_content_strip}</span>
+                    <span class="asset-badge-audio">{badge_text}</span>
                     <audio controls preload="auto" src="{file_url}" class="audio-player" onclick="event.stopPropagation()" playsinline>
                 </div>"""
             else:
                 c_cell_top = f"""
                 <div class="dur-text">
-                    <span class="dur-value">{c_content_strip}</span>
+                    <span class="dur-value">{html.escape(c_content_strip)}</span>
                 </div>"""
         
         c_cell = f"""
         <div class="cell-flex-wrapper">
             {c_cell_top}
-            <input type="text" class="raw-text-edit" data-col="dur" value="{c_content}" placeholder="音频编码/时长"/>
+            <input type="text" class="raw-text-edit" data-col="dur" value="{html.escape(c_content)}" placeholder="音频编码/时长"/>
         </div>"""
 
         # D列：台词内容/角色
