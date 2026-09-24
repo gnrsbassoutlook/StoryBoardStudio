@@ -14,7 +14,10 @@ venv_broken_*/
 # ============ 运行 / 备份产物 ============
 # _backups/ 存两样东西：改代码前的 .py 快照、以及「资产目录未填」时的 Excel 备份回退
 _backups/
-gradio_temp/config.json.bak_*
+# gradio_temp/ 是运行时目录，repo 里不留。config.json 存的是「本机自己的 5 个路径」，
+# 属于个人环境信息：塞进仓库的话，换台机器克隆下来会看到别人的路径，
+# 而且每改一次路径 git status 就多一条改动。已 git rm --cached 退出跟踪。
+gradio_temp/
 # 正常备份位置在 <资产目录>/excel_backup/，那个目录在仓库外
 
 # ============ macOS ============

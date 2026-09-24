@@ -324,9 +324,15 @@ def classify_columns(headers: list):
 
 
 def _text_box(value: str, cls: str, height_px: int, col: int, row: int) -> str:
-    """可编辑文本域：直接改，改完点「同步并保存到 Excel」写回源表。"""
+    """可编辑文本域：直接改，改完点「同步并保存到 Excel」写回源表。
+
+    data-base-h 存住「本列默认高度的基准值」：这个框允许手动拖高（resize: vertical），
+    一拖，浏览器就把行内的 calc(...) 换成固定 px，那一格连同整行、连带图片预览的
+    高度都会被锁死缩不回去。有了基准值，aRestoreTextHeights() 才能把它真正还原。
+    """
     return (
         f'<textarea class="a-text {cls}" data-col="{col}" data-row="{row}" '
+        f'data-base-h="{height_px}" '
         f'spellcheck="false" '
         f'style="height:calc({height_px}px * var(--a-row-scale))">{_esc(value)}</textarea>'
     )
@@ -969,6 +975,16 @@ function applyAssetScales() {
     root.style.setProperty('--a-row-scale', aRowScale);
 }
 
+/* 把「手动拖过」的文本域高度还原成默认的 calc(...)（基准值在 data-base-h 里）。
+   否则内联的固定 px 会盖住 --a-row-scale：这一格缩不回去，行高缩不回去，
+   图片预览的 --a-img-h（量行高得来）也跟着锁死。                      */
+window.aRestoreTextHeights = function() {
+    const boxes = document.querySelectorAll('#assetViewport textarea.a-text[data-base-h]');
+    for (let i = 0; i < boxes.length; i++) {
+        const el = boxes[i];
+        el.style.height = 'calc(' + el.dataset.baseH + 'px * var(--a-row-scale))';
+    }
+};
 window.aAdjustWidth = function(delta) {
     aScale = Math.max(0.5, Math.min(2.5, aScale + delta));
     applyAssetScales();
@@ -978,6 +994,7 @@ window.aAdjustWidth = function(delta) {
 window.aAdjustHeight = function(delta) {
     aRowScale = Math.max(0.5, Math.min(2.5, aRowScale + delta));
     applyAssetScales();
+    aRestoreTextHeights();
     aAutoGrowShort();
     aFitImageHeights();
 };
@@ -1016,15 +1033,33 @@ window.aAutoFitIfNeeded = function(force) {
     applyAssetScales();
 };
 /* 图片预览逐行等高：卡片高度 = 本行最高的「非预览列」单元格高度。
-   只量中间列，既避免自己撑自己，也避免和 sticky 列互相影响。 */
+   ⚠️ 必须先「清零再量」——
+   同一个 <tr> 里所有 <td> 的高度是相等的（行高由最高的那一格决定），所以直接读
+   td.offsetHeight，拿到的是「已经被图片自己撑高之后的整行高度」，于是
+   「量出来 → 写回图片 → 行更高 → 下次量更大」，只涨不落：
+   用户按 Shift+g / r 都缩不回去，就是因为这个自我强化循环。
+   现在的顺序是：先把所有图片格的高度归零 → 一次性量行高（此时行高只由文字格决定）
+   → 再写回。这样图片永远跟着文字走，缩放和「恢复默认」都能立即回落。 */
 window.aFitImageHeights = function() {
     const vp = document.getElementById('assetViewport');
     if (!vp || !vp.clientWidth) return;
     const rows = vp.querySelectorAll('tr.a-row');
+    if (!rows.length) return;
+
+    // 1) 全部归零（只写不读，不触发逐个重排）
+    const pairs = [];
     for (let i = 0; i < rows.length; i++) {
-        const tr = rows[i];
-        const cell = tr.querySelector('td.a-col-imgview');
+        const cell = rows[i].querySelector('td.a-col-imgview');
         if (!cell) continue;
+        cell.style.setProperty('--a-img-h', '0px');
+        pairs.push([rows[i], cell]);
+    }
+    if (!pairs.length) return;
+
+    // 2) 归零后统一测量：只量中间列，既避免自我强化，也避免和 sticky 列互相影响
+    const picks = [];
+    for (let k = 0; k < pairs.length; k++) {
+        const tr = pairs[k][0];
         let h = 0;
         const tds = tr.querySelectorAll('td');
         for (let j = 0; j < tds.length; j++) {
@@ -1034,7 +1069,12 @@ window.aFitImageHeights = function() {
             if (td.offsetHeight > h) h = td.offsetHeight;
         }
         if (!h) h = tr.offsetHeight;
-        cell.style.setProperty('--a-img-h', Math.max(56, Math.round(h - 12)) + 'px');
+        picks.push([pairs[k][1], Math.max(56, Math.round(h - 12))]);
+    }
+
+    // 3) 写回
+    for (let m = 0; m < picks.length; m++) {
+        picks[m][0].style.setProperty('--a-img-h', picks[m][1] + 'px');
     }
 };
 window.aSaveScale = function() {
@@ -1047,6 +1087,7 @@ window.aResetScale = function() {
     localStorage.removeItem('assetScale');
     localStorage.removeItem('assetRowScale');
     applyAssetScales();
+    aRestoreTextHeights();
     aAutoGrowShort();
     aFitImageHeights();
     showToast('资产表已恢复默认排版', 'success');

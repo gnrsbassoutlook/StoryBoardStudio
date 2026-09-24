@@ -39,15 +39,25 @@ def load_config():
     return {"path_a": "", "path_b": "", "asset_dir": "", "video_dir": "", "audio_dir": ""}
 
 def save_config(path_a, path_b, asset_dir, video_dir, audio_dir):
+    data = {
+        "path_a": path_a,
+        "path_b": path_b,
+        "asset_dir": asset_dir,
+        "video_dir": video_dir,
+        "audio_dir": audio_dir,
+    }
+    # 内容没变就不落盘。每次打开 / 刷新页面都会回填一次路径框，那会触发 change 事件；
+    # 没有这道闸门的话，每次刷新都重写一遍同样内容的 config.json，白白刷新文件时间。
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                if json.load(f) == data:
+                    return
+        except Exception:
+            pass
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump({
-            "path_a": path_a,
-            "path_b": path_b,
-            "asset_dir": asset_dir,
-            "video_dir": video_dir,
-            "audio_dir": audio_dir
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ==============================
 # 1. 资产索引与冲突检测（精准匹配X/Y/Z编码）
@@ -609,7 +619,9 @@ CUSTOM_CSS = """
 .asset-card {
     position: relative;
     width: calc(var(--img-base-w) * var(--col-scale));
-    height: calc(var(--img-base-h) * var(--col-scale));
+    /* 也吃 --row-scale：Shift+g / Shift+h 时图片跟着行高一起涨落。
+       纯 CSS 驱动，不依赖任何测量，所以不存在表格 A 那种「越撑越大」的死循环。 */
+    height: calc(var(--img-base-h) * var(--col-scale) * var(--row-scale));
     border-radius: 3px;
     overflow: hidden;
     border: 1px solid #3b4252;
@@ -1408,6 +1420,28 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     btn_next_sheet.click(fn=lambda cur: app_core.step_sheet(1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
 
     btn_save_to_excel.click(None, None, None, js="saveToExcel()")
+
+    # ---- 路径持久化 --------------------------------------------------------
+    # UI 是在「服务启动时」构建的，文本框的 value 只取了一次 load_config()。
+    # 所以只靠 value=init_conf 的话：改了路径不重启服务，刷新页面还是旧值（甚至空值）。
+    # 这里补两件事：①每次打开/刷新页面都从 config.json 重新回填；
+    #              ②光标离开任意一个路径框就落盘，不必等点「🚀 加载/刷新工程」。
+    _path_boxes = [txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir]
+
+    def _prefill_paths():
+        c = load_config()
+        return (c.get("path_a", ""), c.get("path_b", ""), c.get("asset_dir", ""),
+                c.get("video_dir", ""), c.get("audio_dir", ""))
+
+    def _persist_paths(path_a, path_b, asset_dir, video_dir, audio_dir):
+        save_config(path_a, path_b, asset_dir, video_dir, audio_dir)
+
+    demo.load(fn=_prefill_paths, inputs=None, outputs=_path_boxes)
+    # change：手打、粘贴、以及点「📁 浏览…」由前端派发的 input/change 都能盖住
+    # blur  ：手打完直接点别处（不触发 change 的边角情况）也落一次盘
+    for _box in _path_boxes:
+        _box.change(fn=_persist_paths, inputs=_path_boxes, outputs=None)
+        _box.blur(fn=_persist_paths, inputs=_path_boxes, outputs=None)
 
 # ==============================
 # 7. FastAPI 接口

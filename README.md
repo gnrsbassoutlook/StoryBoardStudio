@@ -194,7 +194,15 @@ StoryBoardStudio/
 }
 ```
 
-界面上改完路径点「🚀 加载/刷新工程」会自动写回这个文件，不需要手改。
+界面上改完路径**失焦（点别处）就会自动写回**这个文件，不需要手改，也不必等点「🚀 加载/刷新工程」。
+
+**刷新或重开网页时，顶部那 5 个路径框会自动回填上一次用的路径**，不用每次重敲：
+
+- 打开 / 刷新页面 → 从 `config.json` 把 5 个路径读回输入框
+- 手打、粘贴、以及点「📁 浏览…」选出来的路径 → 立即落盘（失焦或内容变化时）
+- 内容跟文件里一致时不会重复写盘，所以 `config.json` 的修改时间只会因为你真的改了路径而变
+
+> `gradio_temp/` 属于**运行时目录，已被 `.gitignore` 忽略**（`config.json` 里是本机路径，属于个人环境信息，不该进仓库）。所以换台机器克隆下来后，第一次打开是空的，填一次就记住了。
 
 ### 运行时自动生成的目录
 
@@ -212,13 +220,17 @@ StoryBoardStudio/
 __pycache__/                     # Python 字节码缓存，删了会自动重建
 *.pyc  *.pyc.*                   # py_compile 失败时留下的临时字节码
 _backups/                        # 代码快照 + Excel 备份回退目录
-gradio_temp/config.json.bak_*    # 配置的手工备份
+gradio_temp/                     # 运行时目录：config.json 存的是本机 5 个路径（个人环境信息）
 .DS_Store                        # macOS 目录元数据
 venv/                            # 虚拟环境（首次运行本机自动创建）
 ```
 
-> `.DS_Store` 本次已通过 `git rm --cached .DS_Store` **退出跟踪**，不会再被提交。
+> `.DS_Store` 已通过 `git rm --cached .DS_Store` **退出跟踪**，不会再被提交。
 > 如果你在别的机器上还有旧克隆，那台机器要自己跑一次 `git rm --cached .DS_Store` 才能同步。
+>
+> `gradio_temp/config.json` 同样已 **`git rm --cached` 退出跟踪**（它存的是「你这台机器的路径」，
+> 进仓库既会泄露本地目录结构，也会让别人克隆下来看到你的路径）。如果你有旧克隆，
+> 那台机器也跑一次 `git rm --cached gradio_temp/config.json`；不跑也不影响使用，只是 `git status` 里会多一条删除。
 
 ## ⌨️ 快捷键
 
