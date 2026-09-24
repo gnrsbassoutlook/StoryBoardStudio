@@ -49,10 +49,9 @@ if not exist "venv\Scripts\python.exe" (
 
 call "venv\Scripts\activate.bat"
 
-REM requirements.txt 里已写 --index-url 走清华镜像，这里只是给 pip 自升级也加上
-set "PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
-echo [*] 正在检查环境依赖（国内镜像加速）...
-python -m pip install -q --upgrade pip -i "%PIP_MIRROR%"
+REM 走官方 PyPI 源 https://pypi.org/simple
+echo [*] 正在检查环境依赖...
+python -m pip install -q --upgrade pip
 python -m pip install -q -r requirements.txt
 
 echo.

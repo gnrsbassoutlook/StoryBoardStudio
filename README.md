@@ -24,11 +24,14 @@
 ## 💻 环境要求
 
 - **操作系统**：macOS（Intel / Apple Silicon 都行）、Windows 10+、Linux
-  - Mac 用 `.command` 脚本，Windows 用 `.bat` 脚本，Linux 直接用「手动启动」的命令
+  - 启动 / 更新 / 推送三个脚本按平台成对提供：
+    - 🍎 macOS：`launch_sbs_mac.command`、`update-sbs.command`、`push-sbs.command`
+    - 🪟 Windows：`launch_sbs_win.bat`、`update-sbs_win.bat`、`push-sbs_win.bat`
+    - 🐧 Linux：直接用「手动启动」的命令
 - **Python 3.10+**（开发验证于 3.13）
   - Windows 安装时**务必勾选 `Add Python to PATH`**，否则脚本找不到 `python`
 - **浏览器**：**Safari 优先**（已针对 WebKit 的 sticky、Shift 组合键差异做过适配），Chrome / Edge 兼容
-- **网络**：默认走清华 PyPI 镜像；海外网络可在 `requirements.txt` 里删掉 `--index-url` 一行改回官方源
+- **网络**：默认走**官方 PyPI 源**，无需任何额外配置；如果官方源拉得慢，按下方「依赖装太慢」一节临时换镜像即可
 
 ## 🚀 安装与首次运行
 
@@ -82,7 +85,7 @@ python StoryBoardStudio.py
 
 #### 1. 一键启动
 
-双击 **`launch_sbs.bat`**：自动创建虚拟环境 → 安装依赖 → 启动服务 → 打开浏览器。
+双击 **`launch_sbs_win.bat`**：自动创建虚拟环境 → 安装依赖 → 启动服务 → 打开浏览器。
 访问地址：<http://localhost:7861>
 
 脚本同样会自检 7861 端口，**已经在跑就不会重复启动**，只帮你打开页面。
@@ -103,17 +106,38 @@ python StoryBoardStudio.py
 停止服务：在运行窗口按 `Ctrl+C`。
 强杀残留进程：`taskkill /F /IM python.exe`（这会杀掉**所有** python 进程，确认没有别的任务在跑再用）。
 
-### 🔁 依赖装太慢？（国内镜像源）
+### 🔁 依赖装太慢？国内镜像怎么切
 
-`requirements.txt` 顶部已经写好了清华镜像，所以 `pip install -r requirements.txt` **默认就走国内源**：
+**默认走官方 PyPI 源**（`https://pypi.org/simple`），不需要改任何文件、也不需要额外配置。
+
+国内网络要长期加速时，仓库里**已经备好一份镜像版清单**，改个名就生效，**启动脚本一行都不用动**：
+
+```bash
+cd /path/to/StoryBoardStudio
+
+# ①（可选）先把官方版留个底，方便随时换回来
+mv requirements.txt requirements_官方源.txt.bak
+
+# ② 镜像版顶上，改完就能直接用启动脚本了
+mv requirement_国内源.txt requirements.txt
+```
+
+两个文件依赖完全一致，`requirement_国内源.txt` 只多一行：
 
 ```
 --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-- **镜像抽风 / 人在海外**：把那一行**删掉**，即自动回到官方 PyPI
-- **想换源**：文件顶部注释里已列好阿里云 / 腾讯云 / 中科大三套现成的 `--index-url`，换一行即可
-- **临时指定一次**：`pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/`
+想换回官方源：
+
+```bash
+git checkout requirements.txt                                    # 有 git 就直接还原
+mv requirements_官方源.txt.bak requirements.txt                   # 或者把刚才的备份改回来
+```
+
+> 只是临时跑一次、不想动文件也行：`pip install -r requirements.txt -i <镜像地址>`
+>
+> ⚠️ **平时别把 `--index-url` 留在 `requirements.txt` 里** —— 一旦那个源不通，整个安装会卡死在那儿，还不好排查（这正是当初踩的坑）。所以放在单独一份文件里按需切换，而不是默认写死。
 
 ## 📁 目录结构
 
@@ -121,16 +145,17 @@ python StoryBoardStudio.py
 StoryBoardStudio/
 ├── StoryBoardStudio.py          # 主程序：第二部分（分镜表）+ 整体 UI + 服务入口
 ├── asset_tab.py                 # 第一部分（资产表）独立模块，自带 CSS/JS/索引/保存接口
-├── requirements.txt             # Python 依赖（gradio / pandas / openpyxl / Pillow / fastapi / uvicorn）
+├── requirements.txt             # Python 依赖（官方 PyPI 源）★ 启动脚本固定读这个文件
+├── requirement_国内源.txt        # 可选：国内镜像版依赖清单（重命名为 requirements.txt 即生效）
 ├── README.md                    # 本文件
 ├── .gitignore                   # 忽略规则（venv / __pycache__ / _backups / .DS_Store …）
 │
 ├── launch_sbs_mac.command       # 🍎 macOS 一键启动（建 venv → 装依赖 → 起服务 → 开浏览器）
 ├── update-sbs.command           # 🍎 macOS 拉取最新代码（先列最近 20 条提交，确认后再拉）
 ├── push-sbs.command             # 🍎 macOS 提交并推送到 GitHub
-├── launch_sbs.bat               # 🪟 Windows 一键启动
-├── update-sbs.bat               # 🪟 Windows 拉取最新代码
-├── push-sbs.bat                 # 🪟 Windows 提交并推送
+├── launch_sbs_win.bat           # 🪟 Windows 一键启动
+├── update-sbs_win.bat           # 🪟 Windows 拉取最新代码
+├── push-sbs_win.bat             # 🪟 Windows 提交并推送
 │
 ├── gradio_temp/                 # Gradio 本地运行目录
 │   └── config.json              # ★ 本地配置（见下方「配置文件」）
@@ -178,7 +203,7 @@ StoryBoardStudio/
 
 ### ✅ 该提交进仓库的 / ❌ 不该提交的
 
-**该提交**：`StoryBoardStudio.py`、`asset_tab.py`、`requirements.txt`、`README.md`、`.gitignore`、三个 `.command` 脚本（macOS）、三个 `.bat` 脚本（Windows）
+**该提交**：`StoryBoardStudio.py`、`asset_tab.py`、`requirements.txt`、`requirement_国内源.txt`、`README.md`、`.gitignore`、三个 `.command` 脚本（macOS）、三个 `_win.bat` 脚本（Windows）
 
 **不该提交**（已被 `.gitignore` 屏蔽）：
 
@@ -278,7 +303,7 @@ venv/                            # 虚拟环境（首次运行本机自动创建
 | **Win**：提示 `python` 不是内部或外部命令 | Python 没加进 PATH → 重装时勾选 `Add Python to PATH`，或改用 `py -3` 代替 `python` |
 | **Win**：`.bat` 中文提示乱码 | 脚本已 `chcp 65001`；老 `cmd` 字体不全时换 Windows Terminal |
 | **Win**：`netstat` / `taskkill` 提示拒绝访问 | 用「以管理员身份运行」重开终端 |
-| **Win**：`pip` 卡住不动 | 走镜像仍慢就 `pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/`；公司代理需另配 `set HTTPS_PROXY=...` |
+| `pip` 卡住不动 | 默认走官方源；国内网络慢就按「依赖装太慢」一节把 `requirement_国内源.txt` 改名为 `requirements.txt`；公司 / 校园网代理需另配 `set HTTPS_PROXY=...`（Win）或 `export HTTPS_PROXY=...`（macOS） |
 | 从 Mac 拷 `venv` 到 Windows，启动报错 | venv **不能跨系统**，删掉整个 `venv/` 目录后重新双击启动脚本（见「venv 不要跨机器拷贝」） |
 
 ## 🔄 更新与推送
@@ -290,9 +315,9 @@ venv/                            # 虚拟环境（首次运行本机自动创建
 ./push-sbs.command      # 提交并推送（工作区干净时会直接退出，不会产生空提交）
 ```
 
-**Windows**：直接双击 `update-sbs.bat` / `push-sbs.bat`（或在 `cmd` 里运行同样名字）。
+**Windows**：直接双击 `update-sbs_win.bat` / `push-sbs_win.bat`（或在 `cmd` 里运行同样名字）。
 
-推送默认走 SSH（`git@github.com:gnrsbassoutlook/StoryBoardStudio.git`），需要本机已配置 GitHub SSH 密钥；想换 HTTPS 就编辑脚本里注释掉的那两行 —— macOS 在 `push-sbs.command`，Windows 在 `push-sbs.bat`。
+推送默认走 SSH（`git@github.com:gnrsbassoutlook/StoryBoardStudio.git`），需要本机已配置 GitHub SSH 密钥；想换 HTTPS 就编辑脚本里注释掉的那两行 —— macOS 在 `push-sbs.command`，Windows 在 `push-sbs_win.bat`。
 
 ---
 

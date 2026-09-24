@@ -47,10 +47,9 @@ fi
 # 激活虚拟环境
 source venv/bin/activate
 
-# 自动检查并安装依赖（走清华镜像，requirements.txt 里也写了 --index-url）
-PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
-echo "📦 正在检查环境依赖（国内镜像加速）..."
-pip install -q --upgrade pip -i "$PIP_MIRROR"
+# 自动检查并安装依赖（走官方 PyPI 源 https://pypi.org/simple）
+echo "📦 正在检查环境依赖..."
+pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
 echo "🚀 服务已就绪，正在启动 Gradio 并打开浏览器..."

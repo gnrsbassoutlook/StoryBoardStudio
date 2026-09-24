@@ -36,12 +36,12 @@ echo [*] 更新成功！代码已是最新版本。
 for /f "delims=" %%i in ('git rev-parse --short HEAD') do echo [*] 更新后 commit: %%i
 
 if exist "requirements.txt" (
-    echo [*] 正在检查并更新依赖包（国内镜像）...
+    echo [*] 正在检查并更新依赖包...
     if exist "venv\Scripts\python.exe" (
         call "venv\Scripts\activate.bat"
         python -m pip install -q -r requirements.txt
     ) else (
-        echo [!] 未发现 venv，跳过依赖更新（双击 launch_sbs.bat 会自动创建）。
+        echo [!] 未发现 venv，跳过依赖更新（双击 launch_sbs_win.bat 会自动创建）。
     )
 )
 
