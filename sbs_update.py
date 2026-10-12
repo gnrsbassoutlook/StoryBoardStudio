@@ -5,15 +5,22 @@
 由 update-sbs.command / update-sbs_win.bat 调用，也可以直接 `python sbs_update.py`。
 
 流程：
-  1. git fetch 远程，比较本地 HEAD 与 origin/<当前分支>
-  2. 一样 → 直接提示「本地已是最新版本」，什么都不改就退出
-  3. 不一样 → 列出 origin 上最近 20 个提交，输入序号 1-20 选择要部署到本地的
-     版本（直接回车 = 1 = 最新版，q = 退出）
-  4. 切过去之后，用项目 venv（如果有）再检查一遍依赖
+  1. 自动选通道：SSH 可用就用 SSH，否则回退 HTTPS，并同步 origin 地址
+  2. git fetch 远程，列出 origin/<当前分支> 上最近 20 个提交
+  3. 输入序号 1-20 选择要部署到本地的版本（回车 = 1 = 最新版，q = 取消）
+  4. 能快进就快进（merge --ff-only），选了历史版本才提示确认后回退
+  5. 切完顺便把 *.command 的执行权限和隔离属性修好，再问要不要更新依赖
 
-安全设计（只动 git 指针，不删任何文件）：
+为什么这么改（对齐 AutoVideoStudio 的新版推送/更新脚本）：
+  · 本地落后时不再一上来就 reset --hard，优先走快进，避免把本地分支历史冲掉
+  · SSH 不通自动切 HTTPS，换台电脑没配密钥也能更新（旧版只会报「连接失败」）
+  · 选完版本打印本次变动的文件清单，更新前/后版本号一目了然
+  · 切换后自动修复 .command 权限 + 清 quarantine，双击就能跑，不用再手工 chmod
+
+安全设计：
   · 切换前若工作区有未提交改动，自动 git stash 留档，并打印恢复命令
-  · 本地有「不在远程上的提交」时，会额外确认一次，免得把本地提交冲掉
+  · 本地有远程没有的提交、或要往回/横向切换时，额外确认一次才动 git 指针
+  · 自愈：万一回退到「还没有这些脚本的旧版本」，把更新/推送脚本就地放回来
 
 为什么逻辑写在 Python 而不是批处理里：
   · cmd.exe 解析 UTF-8 批处理文件有已知的字节偏移 bug（中文会突然变成
@@ -31,9 +38,19 @@ REPO = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_BRANCH = "main"
 MAX_LIST = 20
 
+REPO_SSH = "git@github.com:gnrsbassoutlook/StoryBoardStudio.git"
+REPO_HTTPS = "https://github.com/gnrsbassoutlook/StoryBoardStudio.git"
+
+IS_MAC = sys.platform == "darwin"
+
 # 运行器本体：更新时万一回退到「还没有这些文件的旧版本」，要把它们放回来，
-# 否则用户下次就找不到启动/更新脚本了。
-RUNNERS = ("sbs_update.py", "update-sbs.command", "update-sbs_win.bat")
+# 否则用户下次就找不到启动/更新/推送脚本了。
+RUNNERS = (
+    "sbs_update.py",
+    "update-sbs.command", "update-sbs_win.bat",
+    "push-sbs.command", "push-sbs_win.bat",
+    "launch_sbs_mac.command", "launch_sbs_win.bat",
+)
 
 
 def _fix_console_encoding() -> None:
@@ -52,8 +69,11 @@ def _fix_console_encoding() -> None:
 
 
 def git(*args: str):
-    """跑 git，返回 (returncode, stdout, stderr)。commit message 一律按 UTF-8 解。"""
-    p = subprocess.run(["git", *args], cwd=REPO, capture_output=True)
+    """跑 git，返回 (returncode, stdout, stderr)。输出一律按 UTF-8 解。"""
+    try:
+        p = subprocess.run(["git", *args], cwd=REPO, capture_output=True)
+    except FileNotFoundError:
+        return (127, "", "git command not found")
     return (p.returncode,
             p.stdout.decode("utf-8", "replace"),
             p.stderr.decode("utf-8", "replace"))
@@ -68,20 +88,49 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def ask(prompt: str):
+    """读一行输入；Ctrl+C / Ctrl+D 返回 None 表示取消。"""
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        say()
+        return None
+
+
 def get_branch() -> str:
     rc, out, _ = git("rev-parse", "--abbrev-ref", "HEAD")
     name = out.strip() if rc == 0 else ""
     return name if name and name != "HEAD" else DEFAULT_BRANCH     # detached 时兜底
 
 
-def show_local_head() -> str:
-    rc, out, _ = git("log", "-1", "--date=short", "--pretty=format:%h  %ad  %s")
+def show_head(ref: str = "HEAD") -> str:
+    rc, out, _ = git("log", "-1", "--date=format:%m-%d %H:%M",
+                     "--pretty=format:%h  %ad  %s", ref)
     return out.strip() if rc == 0 and out.strip() else "(未知)"
+
+
+def ensure_remote() -> None:
+    """SSH 可用就用 SSH，否则回退 HTTPS；顺手把 origin 地址纠正过来。"""
+    say()
+    say("⏳ 检测远程通道 ...")
+    rc, _, _ = git("ls-remote", REPO_SSH, "HEAD")
+    remote = REPO_SSH if rc == 0 else REPO_HTTPS
+    say("        SSH 可用" if rc == 0 else "        SSH 不可用, 自动回退 HTTPS")
+
+    rc, cur, _ = git("remote", "get-url", "origin")
+    cur = cur.strip()
+    if rc != 0 or not cur:
+        git("remote", "add", "origin", remote)
+        say("        已添加 origin 地址")
+    elif cur != remote:
+        git("remote", "set-url", "origin", remote)
+        say("        已更新 origin 地址")
 
 
 def venv_python() -> str:
     """返回项目 venv 里的 python 路径；没建或不可用返回 ""。"""
-    for rel in (("venv", "Scripts", "python.exe"), ("venv", "bin", "python")):
+    for rel in (("venv", "Scripts", "python.exe"), ("venv", "bin", "python"),
+                (".venv", "Scripts", "python.exe"), (".venv", "bin", "python")):
         p = os.path.join(REPO, *rel)
         if os.path.exists(p):
             return p
@@ -89,17 +138,27 @@ def venv_python() -> str:
 
 
 def install_deps() -> None:
-    if not os.path.exists(os.path.join(REPO, "requirements.txt")):
+    req = os.path.join(REPO, "requirements.txt")
+    if not os.path.exists(req):
         return
-    py = venv_python()
-    if not py:
-        say()
-        say("ℹ️  未发现可用的 venv，跳过依赖更新（双击启动脚本会自动创建）。")
-        return
+
     say()
-    say("📦 正在检查并更新依赖包 ...")
+    ans = ask("📦 是否同时更新 Python 依赖? (Y/n) > ")
+    if ans and ans.lower() in ("n", "no"):
+        return
+
+    mirror = os.path.join(REPO, "requirement_国内源.txt")
+    target = req
+    if os.path.exists(mirror):
+        m = ask("    是否使用国内镜像源版本 requirement_国内源.txt? (y/N) > ")
+        if m and m.lower() in ("y", "yes"):
+            target = mirror
+
+    py = venv_python() or sys.executable
+    say()
+    say(f"📦 正在更新依赖 ({os.path.basename(target)}) ...")
     try:
-        rc = subprocess.run([py, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
+        rc = subprocess.run([py, "-m", "pip", "install", "-q", "-r", target],
                             cwd=REPO).returncode
     except Exception as e:                                   # noqa: BLE001
         say(f"⚠️  依赖安装没能启动：{e}")
@@ -108,6 +167,30 @@ def install_deps() -> None:
         say("✅ 依赖已就绪。")
     else:
         say("⚠️  依赖安装失败；不影响代码，双击启动脚本时会再试一次。")
+
+
+def fix_permissions() -> None:
+    """macOS 上把 *.command / *.sh 补回可执行权限，并清掉隔离属性。"""
+    if not IS_MAC:
+        return
+    fixed = []
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files:
+            if not name.endswith((".command", ".sh")):
+                continue
+            p = os.path.join(root, name)
+            try:
+                os.chmod(p, 0o755)
+                subprocess.run(["xattr", "-d", "com.apple.quarantine", p],
+                               capture_output=True)
+                if name not in fixed:
+                    fixed.append(name)
+            except Exception:
+                pass
+    if fixed:
+        say()
+        say("🔑 已修复可执行权限：" + "、".join(fixed))
 
 
 def snapshot_runners() -> dict:
@@ -133,7 +216,7 @@ def restore_runners(snap: dict) -> None:
             try:
                 with open(p, "wb") as f:
                     f.write(data)
-                if name.endswith(".command"):
+                if name.endswith((".command", ".sh")):
                     os.chmod(p, 0o755)
                 fixed.append(name)
             except Exception:
@@ -143,13 +226,31 @@ def restore_runners(snap: dict) -> None:
         say("🛠️  该版本里还没有这些脚本，已为你保留：" + "、".join(fixed))
 
 
-def ask(prompt: str):
-    """读一行输入；Ctrl+C / Ctrl+D 返回 None 表示取消。"""
-    try:
-        return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        say()
-        return None
+def list_commits(ref: str) -> list:
+    """读远程最近 MAX_LIST 条提交，返回 [full, short, date, author, subject]。"""
+    rc, out, err = git("log", f"-n{MAX_LIST}",
+                       "--date=format:%m-%d %H:%M",
+                       "--pretty=format:%H%x1f%h%x1f%ad%x1f%an%x1f%s", ref)
+    if rc != 0 or not out.strip():
+        die("❌ 读取远程提交记录失败。\n" + err.strip())
+    rows = []
+    for ln in out.splitlines():
+        parts = ln.split("\x1f")
+        if len(parts) == 5:
+            rows.append(parts)
+    if not rows:
+        die("❌ 远程没有任何提交记录。")
+    return rows
+
+
+def show_diff_summary(old: str, new: str) -> None:
+    _, out, _ = git("diff", "--name-status", old, new)
+    say("  --------------------------------------------------------------")
+    if out.strip():
+        say(out.rstrip())
+    else:
+        say("  (无文件变动)")
+    say("  --------------------------------------------------------------")
 
 
 def main() -> int:
@@ -160,7 +261,6 @@ def main() -> int:
     say("=================================================")
     say("  🔄 StoryBoardStudio 更新器")
     say("=================================================")
-    say()
 
     if not os.path.isdir(os.path.join(REPO, ".git")):
         die("❌ 当前目录不是 git 仓库，请先 git clone 本项目。")
@@ -168,7 +268,13 @@ def main() -> int:
     branch = get_branch()
     remote_ref = f"origin/{branch}"
 
-    say("⏳ 正在读取远程仓库 ...")
+    say()
+    say(f"📌 当前分支：{branch}")
+
+    ensure_remote()
+
+    say()
+    say("⏳ 正在获取远程最新提交 ...")
     rc, _, err = git("fetch", "--prune", "origin")
     if rc != 0:
         die("❌ 连接远程仓库失败，请检查网络（或 GitHub SSH 密钥）后重试。\n" + err.strip())
@@ -179,29 +285,21 @@ def main() -> int:
         die(f"❌ 找不到远程分支 {remote_ref}，请确认仓库状态。\n{err2.strip()}")
     local_sha, remote_sha = local_sha.strip(), remote_sha.strip()
 
-    say(f"📌 本地当前版本：{show_local_head()}")
+    say()
+    say(f"📌 本地当前版本：{show_head()}")
 
     if local_sha == remote_sha:
         say()
-        say(f"✅ 本地已是最新版本（{remote_ref}），无需更新。")
-        return 0
+        say(f"✅ 本地已与 {remote_ref} 一致（最新）。")
+        say("    下面仍会列出历史提交，可以用来回退；不想动直接按 q 退出。")
 
-    # ---- 列出远程最近 20 个提交 ----
-    rc, out, err = git("log", f"-n{MAX_LIST}", "--date=short",
-                       "--pretty=format:%H%x1f%h%x1f%ad%x1f%s", remote_ref)
-    if rc != 0 or not out.strip():
-        die("❌ 读取远程提交记录失败。\n" + err.strip())
-
-    commits = [ln.split("\x1f") for ln in out.splitlines() if len(ln.split("\x1f")) == 4]
-    if not commits:
-        die("❌ 远程没有任何提交记录。")
-
+    commits = list_commits(remote_ref)
     say()
-    say(f"============== {remote_ref} 最近 {len(commits)} 个提交 ==============")
-    for i, (_full, short, date, subject) in enumerate(commits, 1):
-        mark = "   ← 你现在的版本" if _full == local_sha else ""
-        say(f"  {i:>2}) {short}  {date}  {subject}{mark}")
-    say("=" * 56)
+    say(f"============== {remote_ref} 最近 {len(commits)} 个提交 (1 = 最新) ==============")
+    for i, (full, short, date, author, subject) in enumerate(commits, 1):
+        mark = "   ← 本地当前" if full == local_sha else ""
+        say(f"  {i:>2}) {short}  {date}  {author}  {subject}{mark}")
+    say("=" * 62)
     say()
     say(f"请输入要部署的版本序号（1-{len(commits)}，直接回车 = 1 最新版，q = 退出）：")
 
@@ -222,18 +320,29 @@ def main() -> int:
             break
         say(f"⚠️  请输入 1-{len(commits)} 之间的数字（或 q 退出）：")
 
-    full, short, date, subject = commits[idx - 1]
+    full, short, date, author, subject = commits[idx - 1]
     say()
-    say(f"👉 已选：第 {idx} 个   {short}  {date}  {subject}")
+    say(f"👉 已选：第 {idx} 个   {short}  {date}  {author}  {subject}")
 
-    # ---- 本地有远程没有的提交？先确认 ----
+    if full == local_sha:
+        say()
+        say("ℹ️  本地已经停在这个提交上，无需更新。")
+        return 0
+
+    OLD = show_head()
+
+    # ---- 本地有远程没有的提交？或者要往回/横向切换？先确认 ----
     rc, ahead_out, _ = git("rev-list", "--count", f"{remote_ref}..HEAD")
     ahead = int(ahead_out.strip()) if rc == 0 and ahead_out.strip().isdigit() else 0
-    if ahead > 0:
+    rc_detail, is_anc, _ = git("merge-base", "--is-ancestor", "HEAD", full)
+    need_confirm = (ahead > 0) or (rc_detail != 0)
+    if need_confirm:
         say()
-        say(f"⚠️  本地有 {ahead} 个提交不在 {remote_ref} 上。")
-        say("    继续会把分支退回到你选的版本：这些本地提交不会消失（仍在 git reflog 里），")
-        say("    但更稳妥的做法是先把它们 push 上去。")
+        if ahead > 0:
+            say(f"⚠️  本地有 {ahead} 个提交不在 {remote_ref} 上。")
+        if rc_detail != 0:
+            say("⚠️  所选提交不在本地历史前方（回退或横向切换）。")
+        say("    这些本地提交不会消失（仍在 git reflog 里），但更稳妥的做法是先把它们 push 上去。")
         if (ask("    仍要继续吗？(y/N) > ") or "").lower() not in ("y", "yes"):
             say("已取消，未做任何改动。")
             return 1
@@ -252,22 +361,34 @@ def main() -> int:
         say()
         say("📦 检测到工作区有未提交改动，已自动备份为 git stash，不会丢。")
 
-    # ---- 切换版本 ----
-    if local_sha != full:
+    # ---- 切换版本：能快进就快进，否则回退 ----
+    if rc_detail == 0:
+        say()
+        say(f"⏩ 快进同步到 {short} ...")
+        rc, _, err = git("merge", "--ff-only", full)
+        if rc != 0:
+            say("❌ 快进失败：" + err.strip())
+            say("    本地没有丢东西，需要时手动执行：git merge --abort")
+            return 1
+    else:
+        say()
+        say(f"⏪ 回退/切换到 {short} ...")
         rc, _, err = git("reset", "--hard", full)
         if rc != 0:
             say("❌ 切换版本失败：" + err.strip())
             return 1
-    else:
-        say("ℹ️  当前已经就是这个版本，跳过切换。")
 
     restore_runners(runners)
+    fix_permissions()
 
-    now_sha = git("rev-parse", "HEAD")[1].strip() or full
-
+    NEW = show_head()
     say()
     say("🎉 已部署到本地：")
-    say("   " + show_local_head())
+    say(f"   更新前：{OLD}")
+    say(f"   更新后：{NEW}")
+    say()
+    say("   本次变动的文件：")
+    show_diff_summary(local_sha, full)
 
     if stashed:
         say()
@@ -277,6 +398,8 @@ def main() -> int:
 
     install_deps()
 
+    now_rc, now_sha, _ = git("rev-parse", "HEAD")
+    now_sha = now_sha.strip() if now_rc == 0 else full
     if now_sha != remote_sha:
         say()
         say("ℹ️  想回到最新版：再运行一次本脚本，直接回车（= 第 1 项）即可。")
