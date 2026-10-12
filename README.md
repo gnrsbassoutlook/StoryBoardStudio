@@ -24,8 +24,8 @@
 ## 💻 环境要求
 
 - **操作系统**：macOS（Intel / Apple Silicon 都行）、Windows 10+、Linux
-  - 启动 / 更新 / 推送三个脚本按平台成对提供：
-    - 🍎 macOS：`launch_sbs_mac.command`、`update-sbs.command`、`push-sbs.command`
+  - 脚本按平台成对提供：
+    - 🍎 macOS：`init.command`（**首次克隆后跑一次**）、`launch_sbs_mac.command`、`update-sbs.command`、`push-sbs.command`
     - 🪟 Windows：`launch_sbs_win.bat`、`update-sbs_win.bat`、`push-sbs_win.bat`
     - 🐧 Linux：直接用「手动启动」的命令
 - **Python 3.10+**（开发验证于 3.13）
@@ -37,9 +37,30 @@
 
 ### 🍎 macOS
 
-#### 0. 从 GitHub 下载后先做两件事（**必做**）
+#### 0. 第一次先跑一次 `init.command`（**推荐**）
 
-从 zip 解压或拷贝过来的文件会带上 macOS 的隔离属性，同时脚本的可执行位会丢失 —— 不处理的话双击 `.command` 会被 Gatekeeper 拦下，报「无法打开，因为来自身份不明的开发者」。
+双击 **`init.command`** 就够了，它会一次性做完下面几件事：
+
+- 给目录下所有 `*.command` / `*.sh` 补回**可执行权限**
+- 清掉 **`com.apple.quarantine` 隔离属性**
+- 顺带体检：哪个脚本被转成了 Windows 的 CRLF 换行会一并提醒（CRLF 会报 `bad interpreter ... ^M`）
+
+**Mac 为什么多这一步**：从 zip 解压、网盘下载或跨盘 / 跨机器拷贝过来的文件，会被 macOS 打上**隔离属性**，同时脚本的**可执行位**常常跟着丢。两种情况的表现不一样：
+
+| 症状 | 原因 |
+| --- | --- |
+| 双击报「无法打开，因为来自身份不明的开发者」 | 隔离属性没清（Gatekeeper 拦截） |
+| 双击**完全没反应**，一点提示都没有 | 可执行位丢了 |
+
+不想双击也可以在终端跑：
+
+```bash
+cd /path/to/StoryBoardStudio
+chmod +x init.command     # 万一它自己也没权限
+./init.command
+```
+
+手动版（等价命令，排查问题时更好用）：
 
 ```bash
 cd /path/to/StoryBoardStudio
@@ -52,14 +73,16 @@ xattr -dr com.apple.quarantine .
 #    查看某个文件当前有没有隔离属性（没输出 = 干净）：
 #    xattr -l launch_sbs_mac.command
 
-# ② 恢复可执行权限（三个 .command 脚本都要）
-chmod +x launch_sbs_mac.command push-sbs.command update-sbs.command
+# ② 恢复可执行权限（所有 .command 脚本）
+chmod +x *.command
 
 #    确认权限已生效：输出里要能看到 x
 ls -l *.command
 ```
 
-> 用 `git clone` 拉下来的通常不带隔离属性，但 `chmod +x` 仍建议跑一遍 —— 从别的磁盘 / 网盘拷贝过来时会丢权限位。
+> `git clone` 拉下来的通常**不带**隔离属性，但 `chmod +x` 仍建议跑一遍 —— 从别的磁盘 / 网盘拷贝过来时会丢权限位。
+> **Windows 不需要这一步**：隔离属性和 Unix 可执行位都是 macOS 独有的东西，`.bat` 没有这两样。
+> 更新器（`update-sbs.command`）每次切完版本也会自动重做这两件事，所以一般只有第一次需要记着。
 
 #### 1. 一键启动
 
@@ -150,9 +173,10 @@ StoryBoardStudio/
 ├── README.md                    # 本文件
 ├── .gitignore                   # 忽略规则（venv / __pycache__ / _backups / .DS_Store …）
 │
+├── init.command                 # 🍎 首次克隆后双击一次：补可执行权限 + 解隔离属性
 ├── launch_sbs_mac.command       # 🍎 macOS 一键启动（建 venv → 装依赖 → 起服务 → 开浏览器）
 ├── update-sbs.command           # 🍎 macOS 更新（薄壳，转调 sbs_update.py）
-├── push-sbs.command             # 🍎 macOS 提交并推送到 GitHub
+├── push-sbs.command             # 🍎 macOS 提交并推送到 GitHub（SSH 不通自动回退 HTTPS）
 ├── launch_sbs_win.bat           # 🪟 Windows 一键启动
 ├── update-sbs_win.bat           # 🪟 Windows 更新（薄壳，转调 sbs_update.py）
 ├── push-sbs_win.bat             # 🪟 Windows 提交并推送
@@ -212,7 +236,7 @@ StoryBoardStudio/
 
 ### ✅ 该提交进仓库的 / ❌ 不该提交的
 
-**该提交**：`StoryBoardStudio.py`、`asset_tab.py`、`requirements.txt`、`requirement_国内源.txt`、`README.md`、`.gitignore`、三个 `.command` 脚本（macOS）、三个 `_win.bat` 脚本（Windows）
+**该提交**：`StoryBoardStudio.py`、`asset_tab.py`、`requirements.txt`、`requirement_国内源.txt`、`README.md`、`.gitignore`、四个 `.command` 脚本（macOS，含 `init.command`）、三个 `_win.bat` 脚本（Windows）
 
 **不该提交**（已被 `.gitignore` 屏蔽）：
 
@@ -329,6 +353,7 @@ venv/                            # 虚拟环境（首次运行本机自动创建
 **macOS**
 
 ```bash
+./init.command          # 🍎 首次克隆后跑一次：补权限 + 解隔离（Mac 专用，Windows 不需要）
 ./update-sbs.command    # 交互式更新（见下方说明）
 ./push-sbs.command      # 提交并推送（工作区干净时会直接退出，不会产生空提交）
 ```
@@ -339,16 +364,21 @@ venv/                            # 虚拟环境（首次运行本机自动创建
 
 两个平台的更新脚本都是薄壳，真正的交互逻辑在 `sbs_update.py` 里（Mac / Win 行为完全一致，也不会被 `cmd.exe` 的中文乱码问题波及）：
 
-1. 先连远程仓库，**本地已经是最新就直接提示「本地已是最新版本」，什么都不改就退出**；
-2. 不是最新时，列出远程最近 **20 条提交**，每条带短 SHA、日期、提交信息，并标出「← 你现在的版本」；
+1. 先连远程仓库，**SSH 可用就用 SSH，不可用自动回退 HTTPS**，并顺手把 origin 地址纠正过来（换机器不用改配置）；
+2. 列出远程最近 **20 条提交**，每条带短 SHA、日期时间、作者、说明，并标出「← 本地当前」；
+   **本地已经是最新时也会列出菜单**，方便你回退到历史版本，直接按 `q` 退出即可什么都不做；
 3. 输入序号 `1`–`20` 选择要部署到本地的版本，**直接回车 = 1（最新版）**，输入 `q` 取消；输入别的会提示重新输入，不会退出；
-4. 切换前若工作区有未提交改动，会自动 `git stash` 留档，并在结束时打印 `git stash pop` 的取回方法；
-5. 若本地存在「不在远程上的提交」，会额外确认一次，避免把本地提交冲掉（`reset --hard` 不删数据，它们仍在 `git reflog` 里）；
-6. 万一选中的是还没有 `sbs_update.py` 的早期版本，脚本会把运行器本体写回磁盘，不会让你失去启动 / 更新入口。
+4. **优先安全推进**：所选版本在本地历史前方 → `merge --ff-only` 快进，不碰你的分支历史；
+   只有明确要回退或横向切换时才 `reset --hard`，且会先警告并要求你确认，不会闷头冲掉本地提交；
+5. 切换前若工作区有未提交改动，会自动 `git stash` 留档，并在结束时打印 `git stash pop` 的取回方法；
+6. 本地存在「不在远程上的提交」时会额外确认一次（`reset --hard` 不删数据，它们仍在 `git reflog` 里）；
+7. 切完会打印**本次变动的文件清单**（新增 `A` / 修改 `M` / 删除 `D` 一目了然）；
+8. 切换后自动给 `.command` 补权限 + 清隔离属性（等于帮你跑了一次 `init.command`），然后询问是否更新依赖，可选 `requirement_国内源.txt` 走国内镜像；
+9. 万一选中的是还没有这些脚本的早期版本，脚本会把运行器本体写回磁盘，不会让你失去启动 / 更新 / 推送入口。
 
 脚本只移动 git 指针，**不删任何文件**。想回到最新版：再跑一次，直接回车即可。
 
-推送默认走 SSH（`git@github.com:gnrsbassoutlook/StoryBoardStudio.git`），需要本机已配置 GitHub SSH 密钥；想换 HTTPS 就编辑脚本里注释掉的那两行 —— macOS 在 `push-sbs.command`，Windows 在 `push-sbs_win.bat`。
+推送同样走上面的自动通道：默认 SSH（`git@github.com:gnrsbassoutlook/StoryBoardStudio.git`）需要本机已配置 GitHub SSH 密钥，但**没配密钥也不用管**，会自动回退 HTTPS。推送前还会先 `fetch` 比对，本地落后时先 `--rebase --autostash` 再推，从根上减少冲突。
 
 ---
 
