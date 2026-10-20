@@ -105,6 +105,19 @@ def clean_path(path_str: str) -> str:
 def natural_sort_key(s: str):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
+def media_url_b(path: str) -> str:
+    """表格 B 的媒体 URL，带上文件 mtime 作为缓存戳。
+
+    图片/音频/视频文件被替换（重新生成）后，URL 本身不变，浏览器会继续拿
+    缓存里的旧文件 —— 表现就是「点了加载/刷新工程，图还是旧的」。拼上 mtime
+    后文件一变 URL 就变，不用再去点浏览器自带的刷新按钮。
+    """
+    try:
+        t = int(os.path.getmtime(path) * 1000)
+    except OSError:
+        t = 0
+    return f"/api/local_media?filepath={urllib.parse.quote(path)}&_t={t}"
+
 def _build_index_and_conflicts(root_dir: str, valid_exts: set):
     index = {}
     conflicts = []
@@ -281,7 +294,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                 if audio_path:
                     break
             if audio_path:
-                file_url = f"/api/local_media?filepath={urllib.parse.quote(audio_path)}"
+                file_url = media_url_b(audio_path)
                 badge_text = html.escape(c_content_strip or shot_id)
                 c_cell_top = f"""
                 <div class="audio-card single-audio">
@@ -314,7 +327,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         for code in img_items[:6]:
             code_up = code.upper()
             if code_up in image_index:
-                file_url = f"/api/local_media?filepath={urllib.parse.quote(image_index[code_up])}"
+                file_url = media_url_b(image_index[code_up])
                 img_previews.append(f"""
                     <div class="asset-card" onclick="openLightbox('{file_url}')" title="点击放大: {code}">
                         <img src="{file_url}" alt="{code}" class="thumbnail-img"/>
@@ -337,7 +350,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         # G列视频
         video_preview = ""
         if vid_path:
-            vid_url = f"/api/local_media?filepath={urllib.parse.quote(vid_path)}"
+            vid_url = media_url_b(vid_path)
             video_preview = f"""
             <div class="cell-flex-wrapper">
                 <div class="video-wrap" 
@@ -1268,6 +1281,131 @@ CUSTOM_CSS = CUSTOM_CSS + PATH_PICKER_CSS
 CUSTOM_JS = CUSTOM_JS + PATH_PICKER_JS
 
 # ==============================
+# 4.6 后台断线悬浮红框（终端一关 = 服务进程退出，网页要能自知）
+# ==============================
+# 前端每 3 秒 ping 一次 /api/heartbeat；连续两次打不通（进程没了 / 端口拒了）
+# 就在页面顶部亮一块常驻红框。后端恢复后红框变绿，点一下刷新页面即可继续用。
+HEARTBEAT_CSS = """
+/* 后台断线提示：一小块常驻悬浮框，钉在页面顶部中间 */
+#sbsOfflineBanner {
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2147483647;
+    max-width: 92vw;
+    padding: 10px 18px;
+    border-radius: 8px;
+    background: #c62828;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    text-align: center;
+    line-height: 1.4;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+    border: 1px solid #ff8a80;
+    display: none;
+    cursor: default;
+    -webkit-user-select: none;
+    user-select: none;
+}
+#sbsOfflineBanner.sbs-show { display: block; }
+#sbsOfflineBanner.sbs-recovered {
+    background: #2e7d32;
+    border-color: #a5d6a7;
+    cursor: pointer;
+}
+"""
+
+HEARTBEAT_JS = """
+/* ===== 后台断线检测 =====
+   终端 / 命令提示符窗口一关，uvicorn 进程就没了，网页会变成「能看不能动」。
+   这里轮询 /api/heartbeat：连续 FAIL_LIMIT 次失败才亮红框（躲开睡眠唤醒、
+   瞬时抖动造成的误报）；后端回来后红框变绿提示「已重新连接后台」，
+   停几秒自动消失，期间点一下绿框可直接刷新页面继续工作。               */
+(function () {
+    var HEARTBEAT_MS = 3000;
+    var TIMEOUT_MS = 5000;
+    var FAIL_LIMIT = 2;
+    var RECOVER_HIDE_MS = 5000;   // 绿框停留时长，到点自动消失
+    var fails = 0;
+    var timer = null;
+    var recoverTimer = null;
+    var banner = null;
+
+    function ensureBanner() {
+        if (banner) return banner;
+        banner = document.createElement('div');
+        banner.id = 'sbsOfflineBanner';
+        banner.textContent = '⚠ 后台已断开，请重新运行 SBS';
+        document.body.appendChild(banner);
+        banner.addEventListener('click', function () {
+            if (banner.classList.contains('sbs-recovered')) location.reload();
+        });
+        return banner;
+    }
+
+    function showOffline() {
+        var b = ensureBanner();
+        clearTimeout(recoverTimer);
+        b.classList.remove('sbs-recovered');
+        b.textContent = '⚠ 后台已断开，请重新运行 SBS';
+        b.classList.add('sbs-show');
+    }
+
+    function showRecovered() {
+        var b = ensureBanner();
+        clearTimeout(recoverTimer);
+        b.classList.add('sbs-recovered');
+        b.textContent = '✅ 已重新连接后台，点此刷新页面继续使用';
+        b.classList.add('sbs-show');
+        // 绿框只是告知「后台回来了」，停几秒自动消失，不常驻
+        recoverTimer = setTimeout(function () {
+            b.classList.remove('sbs-show');
+        }, RECOVER_HIDE_MS);
+    }
+
+    function ping() {
+        var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var to = setTimeout(function () { if (ctrl) ctrl.abort(); }, TIMEOUT_MS);
+        fetch('/api/heartbeat', {
+            method: 'GET',
+            cache: 'no-store',
+            signal: ctrl ? ctrl.signal : undefined
+        })
+            .then(function (r) {
+                clearTimeout(to);
+                if (r && r.ok) {
+                    if (fails > 0 && banner &&
+                        banner.classList.contains('sbs-show') &&
+                        !banner.classList.contains('sbs-recovered')) {
+                        showRecovered();
+                    }
+                    fails = 0;
+                }
+            })
+            .catch(function () {
+                clearTimeout(to);
+                fails += 1;
+                if (fails >= FAIL_LIMIT) showOffline();
+            });
+    }
+
+    function start() {
+        if (timer) return;
+        ping();
+        timer = setInterval(ping, HEARTBEAT_MS);
+    }
+
+    if (document.body) start();
+    else if (document.addEventListener) document.addEventListener('DOMContentLoaded', start);
+})();
+"""
+
+CUSTOM_CSS = CUSTOM_CSS + HEARTBEAT_CSS
+CUSTOM_JS = CUSTOM_JS + HEARTBEAT_JS
+
+# ==============================
 # 5. 后端控制器
 # ==============================
 class StoryboardApp:
@@ -1407,12 +1545,16 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     def load_and_refresh(path_a, path_b, asset_p, video_p, audio_p, cur_sheet):
         sheet_update = app_core.load_project(path_a, path_b, asset_p, video_p, audio_p, cur_sheet)
         conflict_html = app_core.get_conflict_html()
-        return sheet_update, conflict_html
+        # 表格 B 本体也要跟着重渲染：场次下拉框的值如果没变（本来就是当前场次），
+        # change 事件不会触发，网页上的表格就还是旧内容 —— 以前必须手动刷新浏览器
+        # 再点一次「加载/刷新工程」才能看到新图，就是这里漏了。
+        sheet_html = app_core.load_sheet_b_content(app_core.current_sheet_b or cur_sheet or "")
+        return sheet_update, conflict_html, sheet_html
 
     btn_load_project.click(
         fn=load_and_refresh,
         inputs=[txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir, dd_sheets_b],
-        outputs=[dd_sheets_b, conflict_panel]
+        outputs=[dd_sheets_b, conflict_panel, html_storyboard_view]
     )
 
     dd_sheets_b.change(fn=app_core.load_sheet_b_content, inputs=[dd_sheets_b], outputs=[html_storyboard_view])
@@ -1564,7 +1706,8 @@ def save_excel_api(req: SaveExcelRequest):
             ws.cell(row=r, column=4, value=row_data.get('dialogue', ''))
             ws.cell(row=r, column=5, value=row_data.get('img', ''))
             ws.cell(row=r, column=6, value=row_data.get('prompt', ''))
-            ws.cell(row=r, column=7, value='')
+            # 第 7 列（G）故意不写：网页上这一列是「视频结果」，按镜头号自动匹配、
+            # 不读取文件内容；而 Sheet3 里 G 列是「视频动态提示词」，写空等于删数据。
         wb.save(app_core.excel_b_path)
         filename = os.path.basename(app_core.excel_b_path)
         if backup_path:
@@ -1576,6 +1719,12 @@ def save_excel_api(req: SaveExcelRequest):
         return {"status": "error", "msg": "❌ 保存失败：Excel 文件正在被占用，请关闭 Excel/WPS 后重试"}
     except Exception as e:
         return {"status": "error", "msg": f"❌ 保存失败: {str(e)}"}
+
+@fastapi_app.get("/api/heartbeat")
+def heartbeat_api():
+    """后台存活探针：前端轮询它判断服务进程是否还在（终端关了它就没了）。"""
+    return {"status": "ok", "ts": datetime.now().isoformat(timespec="seconds")}
+
 
 @fastapi_app.get("/api/local_media")
 def serve_local_media(filepath: str):
@@ -1607,9 +1756,15 @@ def serve_local_media(filepath: str):
 app = gr.mount_gradio_app(fastapi_app, demo, path="/", css=CUSTOM_CSS, js=CUSTOM_JS)
 
 def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
-    """启动前自检：端口被占，说明同款程序已经在跑了，不必再起一个。"""
+    """启动前自检：端口被占，说明同款程序已经在跑了，不必再起一个。
+
+    必须设 SO_REUSEADDR 再 bind：服务刚被杀掉时端口会残留 TIME_WAIT 连接，
+    不设这个选项 bind 会误报 EADDRINUSE（uvicorn 自己是带 SO_REUSEADDR 的，
+    不加就把「杀掉终端后立刻重跑」的正常流程误判成重复启动）。
+    """
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, port))
             return False

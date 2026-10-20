@@ -106,7 +106,16 @@ def _esc(s) -> str:
 
 
 def media_url(path: str) -> str:
-    return MEDIA_URL.format(urllib.parse.quote(path))
+    """媒体 URL + 文件 mtime 缓存戳。
+
+    资产文件被替换（重新生成）后 URL 不变，浏览器会继续拿缓存的旧图；
+    拼上 mtime 后文件一变 URL 就变，点「加载/刷新工程」立刻看到新图。
+    """
+    try:
+        t = int(os.path.getmtime(path) * 1000)
+    except OSError:
+        t = 0
+    return MEDIA_URL.format(urllib.parse.quote(path)) + f"&_t={t}"
 
 
 # 「复制文件地址」可能带上的引号：资源管理器给的是英文双引号，某些输入法 /
