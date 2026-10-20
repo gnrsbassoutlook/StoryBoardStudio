@@ -263,7 +263,7 @@ def backup_excel(filepath: str, asset_dir: str = ""):
 # ==============================
 # 2. 核心表格渲染引擎（D/E列互换）
 # ==============================
-def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
+def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name, portrait_mode=False):
     if df is None or df.empty:
         return "<div class='empty-tip'>暂无数据或工作表为空</div>"
 
@@ -321,25 +321,43 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         </div>"""
 
         # E列：图片资产
+        # 常规最多 6 张（3×2 直接铺满）；极端情况 7-9 张时，9 张排在 3×3 网格里，
+        # 视口只显示两行，滚动条往下滑 = 整体向上滚一行：
+        # 1-3 被挡出去、4-6 上到原来的 1-3 占位、7-9 落入底部。行高不变。
+        MAX_IMG_SLOTS = 9
         img_codes_str = str(row.iloc[4]) if len(row) > 4 and pd.notna(row.iloc[4]) else ""
         img_items = [c.strip() for c in img_codes_str.split('|') if c.strip() and c.strip() != '0']
-        img_previews = []
-        for code in img_items[:6]:
+
+        def _render_asset_card(code):
             code_up = code.upper()
             if code_up in image_index:
                 file_url = media_url_b(image_index[code_up])
-                img_previews.append(f"""
+                return f"""
                     <div class="asset-card" onclick="openLightbox('{file_url}')" title="点击放大: {code}">
-                        <img src="{file_url}" alt="{code}" class="thumbnail-img"/>
+                        <img src="{file_url}" alt="{code}" class="thumbnail-img" onload="sbsImgOnLoad(this)"/>
                         <span class="asset-badge">{code}</span>
-                    </div>""")
-            else:
-                img_previews.append(f"""<div class="asset-card missing" title="未找到文件"><span class="asset-badge">{code}</span><div class="missing-placeholder">无</div></div>""")
+                    </div>"""
+            return f"""<div class="asset-card missing" title="未找到文件"><span class="asset-badge">{code}</span><div class="missing-placeholder">无</div></div>"""
 
-        img_grid = f"<div class='img-grid'>{''.join(img_previews)}</div>"
+        img_previews = [_render_asset_card(code) for code in img_items[:MAX_IMG_SLOTS]]
+
+        if len(img_items) > 6:
+            shown_max = min(len(img_items), MAX_IMG_SLOTS)
+            img_cell_inner = f"""
+            <div class="img-outer" data-portrait-mode="{'1' if portrait_mode else '0'}" onwheel="sbsImgWheel(event, this)">
+                <div class="img-viewport">
+                    <div class="img-grid">{''.join(img_previews)}</div>
+                </div>
+                <div class="img-scrollbar" onpointerdown="sbsTrackDown(event, this.parentElement)" title="滚动或拖动查看第 7-{shown_max} 张（本格共 {len(img_items)} 张）">
+                    <div class="img-scrollbar-thumb" onpointerdown="sbsThumbDown(event, this.closest('.img-outer'))"></div>
+                </div>
+            </div>"""
+        else:
+            img_cell_inner = f"<div class='img-grid'>{''.join(img_previews)}</div>"
+
         img_cell_content = f"""
         <div class="cell-flex-wrapper">
-            {img_grid}
+            {img_cell_inner}
             <input type="text" class="raw-text-edit img-code-input" value="{img_codes_str}" data-col="img" placeholder="图片编码"/>
         </div>"""
 
@@ -538,10 +556,24 @@ CUSTOM_CSS = """
 }
 
 .save-btn {
-    min-height: 28px !important;
+    min-height: 26px !important;
     align-self: stretch;
-    min-width: 160px !important;
-    font-size: 13px !important;
+    min-width: 132px !important;
+    font-size: 12px !important;
+    padding: 2px 10px !important;
+}
+
+/* 保存按钮 + 竖版构图勾选：右侧单独一组，纵向紧凑排列，不占横向空间 */
+.save-portrait-group {
+    gap: 2px !important;
+    align-self: center;
+    min-width: 136px;   /* 必须给住宽度，压成 0 会让勾选框点不到 */
+}
+.portrait-chk {
+    max-width: 136px;
+}
+.portrait-chk label, .portrait-chk span {
+    font-size: 12px !important;
 }
 
 /* 表格视口 */
@@ -621,17 +653,12 @@ CUSTOM_CSS = """
     font-family: inherit;
 }
 
-/* E列图片 */
-.img-grid {
-    display: grid;
-    grid-template-columns: repeat(3, calc(var(--img-base-w) * var(--col-scale)));
-    gap: 4px;
-    width: 100%;
-}
-
+/* E列图片：三列均分单元格内容宽度，图片右缘紧贴 E/F 列分界线。
+   列宽随 g/h 的 --col-scale 一起伸缩；卡片高度仍由原公式决定，行高稳定。
+   （.img-grid 本体定义在下方「7-9 张整体滚动」一节，含 transform 平移） */
 .asset-card {
     position: relative;
-    width: calc(var(--img-base-w) * var(--col-scale));
+    width: 100%;
     /* 也吃 --row-scale：Shift+g / Shift+h 时图片跟着行高一起涨落。
        纯 CSS 驱动，不依赖任何测量，所以不存在表格 A 那种「越撑越大」的死循环。 */
     height: calc(var(--img-base-h) * var(--col-scale) * var(--row-scale));
@@ -641,6 +668,94 @@ CUSTOM_CSS = """
     background: #0a0a0f;
     box-sizing: border-box;
     flex-shrink: 0;
+}
+
+/* 竖图兼容：JS 在图片加载后按 naturalWidth < naturalHeight 加 .portrait。
+   竖图占 2 行 1 列（高度≈横图 2 倍+gap），contain 后显示面积与横图协调；
+   height:auto 让 grid stretch 接管（覆盖基类固定高）。平移量由 JS 动态测量，
+   所以竖图撑高网格后滚动依然精确。 */
+.asset-card.portrait {
+    grid-row: span 2;
+    height: auto;
+}
+
+/* ===== 7-9 张极端情况：整体滚动一行（3×3 网格，视口只露两行）=====
+   仿 Finder/网页：9 张排在 3×3 网格，滚动条往下滑时整体向上滚一行——
+   1-3 被挡出去、4-6 上到原来的 1-3 占位、7-9 落入底部。
+   滚动条是 macOS overlay 式：平时隐形不占布局，悬停这一格才淡入。
+   progress（--page-progress: 0→1）连续渐变；拖动 thumb 时跟手，松手吸附。 */
+.img-outer {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    --page-progress: 0;
+    position: relative;    /* 滚动条浮层的参照 */
+}
+
+/* 视口：只显示两行（2×卡高 + 1×gap），超出的第三行裁掉 */
+.img-viewport {
+    overflow: hidden;
+    height: calc(var(--img-base-h) * var(--col-scale) * var(--row-scale) * 2 + 4px);
+    flex: 1;
+    min-width: 0;
+}
+
+/* 网格整体平移：progress=1 时正好滚到底。
+   平移量 --img-max-scroll 由 JS 动态测量（内容总高 - 视口高）：
+   纯横图时是一行（卡高+gap）；混有竖图（span 2 撑高网格）时自动适配。 */
+.img-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    width: 100%;
+    transform: translateY(calc(-1 * var(--page-progress, 0) * var(--img-max-scroll, 62px)));
+    transition: transform .18s ease;
+}
+.img-outer.dragging .img-grid {
+    transition: none;   /* 拖动时去过渡，内容跟手连续滚动 */
+}
+
+/* 滚动条本体：绝对定位浮在图片右缘，平时 opacity:0 + pointer-events:none，
+   既不占宽度也不挡图片点击；悬停 .img-outer 时淡入并可交互。 */
+.img-scrollbar {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    background: rgba(20, 22, 27, 0.55);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s;
+    z-index: 2;
+}
+.img-outer:hover .img-scrollbar {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* thumb：可见行数 / 总行数。纯横图 3 行露 2 行 → 66.67%；
+   混竖图（span 2 后总行数变多）时由 JS 写入 --img-thumb-ratio 动态适配。 */
+.img-scrollbar-thumb {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: calc(var(--img-thumb-ratio, 0.6667) * 100%);
+    background: #4c566a;
+    border-radius: 3px;
+    transform: translateY(calc(var(--page-progress, 0) * 100%));
+    transition: transform .18s ease, background .15s;
+}
+.img-scrollbar-thumb:hover {
+    background: #88c0d0;
+}
+/* 拖动时去掉过渡，thumb 与内容一起跟手连续变化 */
+.img-outer.dragging .img-scrollbar-thumb {
+    transition: none;
+    background: #88c0d0;
 }
 
 .thumbnail-img {
@@ -1152,6 +1267,108 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
+/* ===== E 列图片格：7-9 张时的滚动条整体滚动 =====
+   滚轮在本格上滚动 → 整体向上滚（1-3 被挡出去、4-6 上到 1-3 占位、7-9 入底）；
+   也可以直接拖动 thumb（松手吸附到最近一页），或点击滚动条空白处跳页。 */
+
+/* 每张图片加载完：按「竖版构图」勾选状态（outer.dataset.portraitMode）决定
+   竖图是否 span 2 增高；未勾选时竖图与横图同大小（contain  letterbox）。
+   每次处理都主动重算一次平移量/thumb 比例（幂等，避开 RO 时序漏帧）。 */
+window.sbsImgOnLoad = function(img) {
+    if (img.dataset.sbsDone === '1') return;
+    if (!img.complete || !img.naturalWidth) return;
+    img.dataset.sbsDone = '1';
+    const outer = img.closest('.img-outer');
+    const card = img.parentElement;
+    const portraitOn = !!(outer && outer.dataset.portraitMode === '1');
+    const isPortrait = !!(img.naturalWidth && img.naturalWidth < img.naturalHeight);
+    if (portraitOn && isPortrait) card.classList.add('portrait');
+    else card.classList.remove('portrait');
+    if (!outer) return;
+    const grid = outer.querySelector('.img-grid');
+    const vp = outer.querySelector('.img-viewport');
+    if (!grid || !vp) return;
+    /* classList.add/remove 是同步布局，这里读到的 scrollHeight 已是最新 */
+    window.sbsImgUpdateMetrics(outer);
+    if (outer._sbsRO) return;
+    outer._sbsRO = new ResizeObserver(function() { window.sbsImgUpdateMetrics(outer); });
+    outer._sbsRO.observe(grid);
+    outer._sbsRO.observe(vp);
+};
+
+/* 兜底扫描：Gradio 用 innerHTML 重渲染表格时，缓存命中的 img 可能迟迟不派发
+   load 事件。这里每 600ms 扫一遍未处理的图，保证 portrait 类和滚动参数
+   最多延迟几百毫秒必然就位（与 onload 路径殊途同归，靠 sbsDone 防重复）。 */
+setInterval(function() {
+    document.querySelectorAll('.img-outer img.thumbnail-img').forEach(function(img) {
+        if (img.dataset.sbsDone !== '1' && img.complete && img.naturalWidth) {
+            window.sbsImgOnLoad(img);
+        }
+    });
+}, 600);
+
+/* 动态测量：内容总高 - 视口高 = 最大平移距离；视口/内容比 = thumb 高度比例 */
+window.sbsImgUpdateMetrics = function(outer) {
+    const vp = outer.querySelector('.img-viewport');
+    const grid = outer.querySelector('.img-grid');
+    if (!vp || !grid) return;
+    const maxScroll = Math.max(1, grid.scrollHeight - vp.clientHeight);
+    outer.style.setProperty('--img-max-scroll', maxScroll + 'px');
+    outer.style.setProperty('--img-thumb-ratio', (vp.clientHeight / grid.scrollHeight).toFixed(4));
+};
+
+window.sbsImgSetProgress = function(outer, p) {
+    p = Math.max(0, Math.min(1, p));
+    outer.style.setProperty('--page-progress', p.toFixed(3));
+};
+
+window.sbsImgWheel = function(e, outer) {
+    e.preventDefault();
+    e.stopPropagation();   /* 本格劫持滚轮，不冒泡到表格竖滚 */
+    const cur = parseFloat(outer.style.getPropertyValue('--page-progress')) || 0;
+    /* 滚得猛翻得快：小幅滚动细调，大幅滚动快翻 */
+    const step = Math.abs(e.deltaY) > 40 ? 0.25 : 0.15;
+    outer.classList.remove('dragging');   /* 滚轮翻页带过渡动画 */
+    window.sbsImgSetProgress(outer, cur + (e.deltaY > 0 ? step : -step));
+};
+
+window.sbsThumbDown = function(e, outer) {
+    e.preventDefault();
+    e.stopPropagation();   /* 别冒泡到 track 的跳页逻辑 */
+    const thumb = e.currentTarget;
+    const track = thumb.parentElement;
+    const trackH = track.offsetHeight || 1;
+    const maxTop = trackH - thumb.offsetHeight;   /* thumb 高 50%，可移动 50% */
+    const startY = e.clientY;
+    const startP = parseFloat(outer.style.getPropertyValue('--page-progress')) || 0;
+    outer.classList.add('dragging');   /* 去过渡，thumb 与内容跟手渐变 */
+    try { thumb.setPointerCapture(e.pointerId); } catch (err) {}
+    const onMove = function(ev) {
+        window.sbsImgSetProgress(outer, startP + (ev.clientY - startY) / (maxTop || 1));
+    };
+    const onUp = function() {
+        thumb.removeEventListener('pointermove', onMove);
+        thumb.removeEventListener('pointerup', onUp);
+        thumb.removeEventListener('pointercancel', onUp);
+        outer.classList.remove('dragging');
+        /* 松手吸附：过半归位到第 2 页，否则回第 1 页 */
+        const p = parseFloat(outer.style.getPropertyValue('--page-progress')) || 0;
+        window.sbsImgSetProgress(outer, p >= 0.5 ? 1 : 0);
+    };
+    thumb.addEventListener('pointermove', onMove);
+    thumb.addEventListener('pointerup', onUp);
+    thumb.addEventListener('pointercancel', onUp);
+};
+
+window.sbsTrackDown = function(e, outer) {
+    e.preventDefault();
+    const track = e.currentTarget;
+    const rect = track.getBoundingClientRect();
+    const ratio = (e.clientY - rect.top) / (rect.height || 1);
+    outer.classList.remove('dragging');
+    window.sbsImgSetProgress(outer, ratio >= 0.5 ? 1 : 0);
+};
+
 document.addEventListener('wheel', function(e) {
     const viewport = document.getElementById('storyboardViewport');
     if (!viewport) return;
@@ -1417,6 +1634,8 @@ class StoryboardApp:
         self.audio_conflicts = []
         self.video_paths = []
         self.b_sheets, self.current_sheet_b = [], ""
+        # 「竖版构图」勾选：开启后竖图卡片 span 2 行（增高）；关闭则与横图同大小
+        self.portrait_mode = False
 
     def load_project(self, path_a, path_b, asset_p, video_p, audio_p, current_sheet_val):
         save_config(path_a, path_b, asset_p, video_p, audio_p)
@@ -1466,7 +1685,7 @@ class StoryboardApp:
             return "<div class='empty-tip'>请先加载分镜表</div>"
         self.current_sheet_b = sheet_name
         df = pd.read_excel(self.excel_b_path, sheet_name=sheet_name)
-        return render_table_b_html(df, self.image_index, self.audio_index, self.video_paths, sheet_name)
+        return render_table_b_html(df, self.image_index, self.audio_index, self.video_paths, sheet_name, self.portrait_mode)
 
     def step_sheet(self, direction, current_sheet):
         if not self.b_sheets or current_sheet not in self.b_sheets:
@@ -1524,10 +1743,12 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
                 btn_scale_save = gr.Button("📌 记住排版", scale=1)
                 btn_scale_reset = gr.Button("🔄 恢复默认", scale=1)
 
-            # 第三行：主提示词 + 保存按钮
+            # 第三行：主提示词 + 右侧「保存按钮 + 竖版构图勾选」一组（占地尽量小）
             with gr.Row(elem_classes="prompt-save-row"):
                 gr.HTML("""<div id="masterPromptBox" class="master-prompt-preview"></div>""")
-                btn_save_to_excel = gr.Button("💾 同步并保存到 Excel", variant="primary", scale=0, elem_classes="save-btn")
+                with gr.Column(scale=0, elem_classes="save-portrait-group"):
+                    btn_save_to_excel = gr.Button("💾 同步并保存到 Excel", variant="primary", elem_classes="save-btn")
+                    chk_portrait = gr.Checkbox(label="竖版构图", value=False, elem_classes="portrait-chk")
 
             html_storyboard_view = gr.HTML("<div class='empty-tip'>等待加载工程数据...</div>")
 
@@ -1562,6 +1783,13 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     btn_next_sheet.click(fn=lambda cur: app_core.step_sheet(1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
 
     btn_save_to_excel.click(None, None, None, js="saveToExcel()")
+
+    # 「竖版构图」勾选：切换后重渲染当前场次（竖图卡片 span 2 增高 or 与横图同大小）
+    def _toggle_portrait_mode(on):
+        app_core.portrait_mode = bool(on)
+        return app_core.load_sheet_b_content(app_core.current_sheet_b)
+
+    chk_portrait.change(fn=_toggle_portrait_mode, inputs=[chk_portrait], outputs=[html_storyboard_view])
 
     # ---- 路径持久化 --------------------------------------------------------
     # UI 是在「服务启动时」构建的，文本框的 value 只取了一次 load_config()。
