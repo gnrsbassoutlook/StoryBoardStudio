@@ -263,7 +263,7 @@ def backup_excel(filepath: str, asset_dir: str = ""):
 # ==============================
 # 2. 核心表格渲染引擎（D/E列互换）
 # ==============================
-def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name, portrait_mode=False):
+def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
     if df is None or df.empty:
         return "<div class='empty-tip'>暂无数据或工作表为空</div>"
 
@@ -333,7 +333,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name, p
             if code_up in image_index:
                 file_url = media_url_b(image_index[code_up])
                 return f"""
-                    <div class="asset-card" onclick="openLightbox('{file_url}')" title="点击放大: {code}">
+                    <div class="asset-card" onclick="openLightbox('{file_url}')" title="点击放大">
                         <img src="{file_url}" alt="{code}" class="thumbnail-img" onload="sbsImgOnLoad(this)"/>
                         <span class="asset-badge">{code}</span>
                     </div>"""
@@ -344,7 +344,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name, p
         if len(img_items) > 6:
             shown_max = min(len(img_items), MAX_IMG_SLOTS)
             img_cell_inner = f"""
-            <div class="img-outer" data-portrait-mode="{'1' if portrait_mode else '0'}" onwheel="sbsImgWheel(event, this)">
+            <div class="img-outer" onwheel="sbsImgWheel(event, this)">
                 <div class="img-viewport">
                     <div class="img-grid">{''.join(img_previews)}</div>
                 </div>
@@ -563,17 +563,10 @@ CUSTOM_CSS = """
     padding: 2px 10px !important;
 }
 
-/* 保存按钮 + 竖版构图勾选：右侧单独一组，纵向紧凑排列，不占横向空间 */
-.save-portrait-group {
-    gap: 2px !important;
+/* 保存按钮：右侧单独一组，纵向不占横向空间 */
+.save-btn-wrap {
     align-self: center;
-    min-width: 136px;   /* 必须给住宽度，压成 0 会让勾选框点不到 */
-}
-.portrait-chk {
-    max-width: 136px;
-}
-.portrait-chk label, .portrait-chk span {
-    font-size: 12px !important;
+    min-width: 132px;
 }
 
 /* 表格视口 */
@@ -668,15 +661,6 @@ CUSTOM_CSS = """
     background: #0a0a0f;
     box-sizing: border-box;
     flex-shrink: 0;
-}
-
-/* 竖图兼容：JS 在图片加载后按 naturalWidth < naturalHeight 加 .portrait。
-   竖图占 2 行 1 列（高度≈横图 2 倍+gap），contain 后显示面积与横图协调；
-   height:auto 让 grid stretch 接管（覆盖基类固定高）。平移量由 JS 动态测量，
-   所以竖图撑高网格后滚动依然精确。 */
-.asset-card.portrait {
-    grid-row: span 2;
-    height: auto;
 }
 
 /* ===== 7-9 张极端情况：整体滚动一行（3×3 网格，视口只露两行）=====
@@ -779,6 +763,8 @@ CUSTOM_CSS = """
     margin-top: 2px;
 }
 
+/* 资产代码：平时完全隐形（只看图），光标悬停该卡片时才在底部淡入。
+   位置和样式与常驻版一致（底部半透明黑条 + 青色代码），淡入淡出 120ms。 */
 .asset-badge {
     position: absolute;
     bottom: 0;
@@ -789,6 +775,12 @@ CUSTOM_CSS = """
     font-size: 9px;
     text-align: center;
     line-height: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .12s ease;
+}
+.asset-card:hover .asset-badge {
+    opacity: 1;
 }
 
 .img-code-input {
@@ -1271,19 +1263,13 @@ document.addEventListener('keydown', function(e) {
    滚轮在本格上滚动 → 整体向上滚（1-3 被挡出去、4-6 上到 1-3 占位、7-9 入底）；
    也可以直接拖动 thumb（松手吸附到最近一页），或点击滚动条空白处跳页。 */
 
-/* 每张图片加载完：按「竖版构图」勾选状态（outer.dataset.portraitMode）决定
-   竖图是否 span 2 增高；未勾选时竖图与横图同大小（contain  letterbox）。
-   每次处理都主动重算一次平移量/thumb 比例（幂等，避开 RO 时序漏帧）。 */
+/* 每张图片加载完：重算一次本格的平移量/thumb 比例（幂等，避开 RO 时序漏帧）。
+   竖图与横图同大小（contain letterbox），不做特殊增高。 */
 window.sbsImgOnLoad = function(img) {
     if (img.dataset.sbsDone === '1') return;
     if (!img.complete || !img.naturalWidth) return;
     img.dataset.sbsDone = '1';
     const outer = img.closest('.img-outer');
-    const card = img.parentElement;
-    const portraitOn = !!(outer && outer.dataset.portraitMode === '1');
-    const isPortrait = !!(img.naturalWidth && img.naturalWidth < img.naturalHeight);
-    if (portraitOn && isPortrait) card.classList.add('portrait');
-    else card.classList.remove('portrait');
     if (!outer) return;
     const grid = outer.querySelector('.img-grid');
     const vp = outer.querySelector('.img-viewport');
@@ -1297,7 +1283,7 @@ window.sbsImgOnLoad = function(img) {
 };
 
 /* 兜底扫描：Gradio 用 innerHTML 重渲染表格时，缓存命中的 img 可能迟迟不派发
-   load 事件。这里每 600ms 扫一遍未处理的图，保证 portrait 类和滚动参数
+   load 事件。这里每 600ms 扫一遍未处理的图，保证滚动参数
    最多延迟几百毫秒必然就位（与 onload 路径殊途同归，靠 sbsDone 防重复）。 */
 setInterval(function() {
     document.querySelectorAll('.img-outer img.thumbnail-img').forEach(function(img) {
@@ -1634,8 +1620,6 @@ class StoryboardApp:
         self.audio_conflicts = []
         self.video_paths = []
         self.b_sheets, self.current_sheet_b = [], ""
-        # 「竖版构图」勾选：开启后竖图卡片 span 2 行（增高）；关闭则与横图同大小
-        self.portrait_mode = False
 
     def load_project(self, path_a, path_b, asset_p, video_p, audio_p, current_sheet_val):
         save_config(path_a, path_b, asset_p, video_p, audio_p)
@@ -1685,7 +1669,7 @@ class StoryboardApp:
             return "<div class='empty-tip'>请先加载分镜表</div>"
         self.current_sheet_b = sheet_name
         df = pd.read_excel(self.excel_b_path, sheet_name=sheet_name)
-        return render_table_b_html(df, self.image_index, self.audio_index, self.video_paths, sheet_name, self.portrait_mode)
+        return render_table_b_html(df, self.image_index, self.audio_index, self.video_paths, sheet_name)
 
     def step_sheet(self, direction, current_sheet):
         if not self.b_sheets or current_sheet not in self.b_sheets:
@@ -1743,12 +1727,11 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
                 btn_scale_save = gr.Button("📌 记住排版", scale=1)
                 btn_scale_reset = gr.Button("🔄 恢复默认", scale=1)
 
-            # 第三行：主提示词 + 右侧「保存按钮 + 竖版构图勾选」一组（占地尽量小）
+            # 第三行：主提示词 + 右侧保存按钮（占地尽量小）
             with gr.Row(elem_classes="prompt-save-row"):
                 gr.HTML("""<div id="masterPromptBox" class="master-prompt-preview"></div>""")
-                with gr.Column(scale=0, elem_classes="save-portrait-group"):
+                with gr.Column(scale=0, elem_classes="save-btn-wrap"):
                     btn_save_to_excel = gr.Button("💾 同步并保存到 Excel", variant="primary", elem_classes="save-btn")
-                    chk_portrait = gr.Checkbox(label="竖版构图", value=False, elem_classes="portrait-chk")
 
             html_storyboard_view = gr.HTML("<div class='empty-tip'>等待加载工程数据...</div>")
 
@@ -1783,13 +1766,6 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     btn_next_sheet.click(fn=lambda cur: app_core.step_sheet(1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
 
     btn_save_to_excel.click(None, None, None, js="saveToExcel()")
-
-    # 「竖版构图」勾选：切换后重渲染当前场次（竖图卡片 span 2 增高 or 与横图同大小）
-    def _toggle_portrait_mode(on):
-        app_core.portrait_mode = bool(on)
-        return app_core.load_sheet_b_content(app_core.current_sheet_b)
-
-    chk_portrait.change(fn=_toggle_portrait_mode, inputs=[chk_portrait], outputs=[html_storyboard_view])
 
     # ---- 路径持久化 --------------------------------------------------------
     # UI 是在「服务启动时」构建的，文本框的 value 只取了一次 load_config()。
