@@ -365,6 +365,8 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         </div>"""
 
         prompt = str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+        # H列：F 列提示词的中文翻译。SBS 读前 7 列，这一列是给人看的（见 image-prompts.md）
+        prompt_zh = str(row.iloc[7]) if len(row) > 7 and pd.notna(row.iloc[7]) else ""
 
         vid_path = find_matching_video(shot_id, video_paths)
 
@@ -412,6 +414,9 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                     <textarea class="prompt-box" data-col="prompt">{prompt}</textarea>
                 </td>
                 <td class="col-video">{video_preview}</td>
+                <td class="col-prompt-zh">
+                    <textarea class="raw-text-edit prompt-zh-box" data-col="prompt-zh" spellcheck="false">{html.escape(prompt_zh)}</textarea>
+                </td>
             </tr>
         """)
 
@@ -429,6 +434,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                     <th class="col-img">E.图片资产</th>
                     <th class="col-prompt">F.生视频提示词</th>
                     <th class="col-video">G.视频结果</th>
+                    <th class="col-prompt-zh">H.提示词中文翻译</th>
                 </tr>
             </thead>
             <tbody>{table_body}</tbody>
@@ -537,9 +543,22 @@ CUSTOM_CSS = """
 .prompt-save-row {
     display: flex;
     align-items: stretch;
-    gap: 8px;
+    gap: 6px;
     margin-bottom: 6px;
+    /* 不许换行：一旦换行，预览框会被挤到第二行，纵向空间白白吃掉 */
+    flex-wrap: nowrap !important;
 }
+
+/* 【关键】gradio 给每个 block 默认 320px 的 min-width。
+   原来中英切换按钮自己在行里占一个 block，就被撑成 320px，
+   把预览框活生生挤掉一半。现在：
+     · 预览块是唯一可伸缩项（flex:1）
+     · 右侧按钮组按内容宽度固定（flex:0 0 auto）
+     · 所有子块 min-width 归零，不让默认值参与计算 */
+.prompt-save-row > * { min-width: 0 !important; }
+.prompt-save-row > .master-prompt-wrap { flex: 1 1 0% !important; min-width: 0 !important; }
+.prompt-save-row > .save-btn-wrap { flex: 0 0 auto !important; min-width: 0 !important; }
+.prompt-save-row .master-prompt-preview { width: 100%; }
 
 .master-prompt-preview {
     flex: 1;
@@ -556,6 +575,11 @@ CUSTOM_CSS = """
     color: #f0f3f8;
     white-space: pre-wrap !important;
     word-wrap: break-word !important;
+    /* 默认 90px（与表 A 一致）；嫌窄可以自己往下拖，本次会话内有效，
+       max-height 拦住它别把表格挤出屏幕 */
+    resize: vertical;
+    min-height: 90px;
+    max-height: 42vh;
 }
 
 .save-btn {
@@ -568,8 +592,10 @@ CUSTOM_CSS = """
 
 /* 保存按钮：右侧单独一组，纵向不占横向空间 */
 .save-btn-wrap {
-    align-self: center;
+    align-self: stretch;
     min-width: 132px;
+    gap: 4px !important;
+    justify-content: center;
 }
 
 /* 表格视口 */
@@ -582,6 +608,48 @@ CUSTOM_CSS = """
     background: #181a20;
     scroll-behavior: smooth;
 }
+
+/* 【悬停显形的滚动条】
+   macOS 默认 overlay 滚动条只在滑动瞬间露一下，普通鼠标既看不到也点不到；
+   而做成常驻又会永久吃掉十几像素高度，表格就少看半行。
+   折中：给元素显式写 ::-webkit-scrollbar 让浏览器切成可自定义样式，
+   平时把滑轨和滑块都设成全透明（视觉上等于没有），
+   鼠标移到表格区域（:hover）才点亮。
+   —— 不占视觉，但想拖的时候一定找得到。 */
+.storyboard-viewport::-webkit-scrollbar,
+.a-viewport::-webkit-scrollbar { width: 8px; height: 8px; }
+
+.storyboard-viewport::-webkit-scrollbar-track,
+.a-viewport::-webkit-scrollbar-track { background: transparent; }
+
+.storyboard-viewport::-webkit-scrollbar-thumb,
+.a-viewport::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+/* 悬停在视口内才显形 */
+.storyboard-viewport:hover::-webkit-scrollbar-thumb,
+.a-viewport:hover::-webkit-scrollbar-thumb {
+    background: #5b6675;
+    background-clip: padding-box;
+}
+
+.storyboard-viewport:hover::-webkit-scrollbar-thumb:hover,
+.a-viewport:hover::-webkit-scrollbar-thumb:hover {
+    background: #78828f;
+    background-clip: padding-box;
+}
+
+.storyboard-viewport::-webkit-scrollbar-corner,
+.a-viewport::-webkit-scrollbar-corner { background: transparent; }
+
+/* Firefox（顺带，不影响 Chrome/Safari） */
+.storyboard-viewport, .a-viewport { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.storyboard-viewport:hover, .a-viewport:hover { scrollbar-color: #5b6675 transparent; }
+
 
 .storyboard-table {
     width: max-content;
@@ -631,6 +699,28 @@ CUSTOM_CSS = """
 .col-img { width: calc(290px * var(--col-scale)); }
 .col-prompt { width: calc(330px * var(--col-scale)); }
 .col-video { width: calc(230px * var(--col-scale)); }
+/* H 列：提示词中文翻译。排在视频结果右边，窄屏要往右拖才看到（大屏一次看全）。
+   不设 sticky，所以它不会像右侧预览列那样挡住内容。 */
+.col-prompt-zh { width: calc(300px * var(--col-scale)); }
+
+.prompt-zh-box {
+    background: #14161b;
+    border: 1px solid #2e3440;
+    border-left: 2px solid #d7c08a;
+    padding: 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #cfd6e4;
+    width: 100%;
+    height: 100%;
+    min-height: 120px;
+    resize: vertical;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.prompt-zh-box:focus { outline: none; border-color: #ebcb8b; }
 
 /* D列台词 */
 .dialogue-input {
@@ -1070,15 +1160,31 @@ window.showToast = function(msg, type = 'success') {
     }, 2500);
 };
 
+/* 提示词预览：中英文切换（语言状态在 asset_tab.py 里统一维护，这里只负责渲染） */
+window.sbsSelectedRow = null;
 window.onRowClick = function(tr) {
+    window.sbsSelectedRow = tr;
     document.querySelectorAll('tr.storyboard-row').forEach(r => r.classList.remove('selected-row'));
     tr.classList.add('selected-row');
-    const promptDiv = tr.querySelector('[data-col="prompt"]');
+    window.sbsRenderMaster();
+};
+
+window.sbsRenderMaster = function() {
     const box = document.getElementById('masterPromptBox');
-    if (promptDiv && box) {
-        const text = promptDiv.value || '';
-        box.innerHTML = "<b style='color:#ebcb8b'>[本镜提示词]：</b>" + (text ? text : "<i style='color:#8c9ba5'>无提示词内容</i>");
+    if (!box) return;
+    const tr = window.sbsSelectedRow;
+    if (!tr) {
+        box.innerHTML = "<i style='color:#8c9ba5'>点击任意一行，这里显示该镜的生视频提示词　·　没有触控板？按住 Shift 滚滚轮可左右滑动</i>";
+        return;
     }
+    const zh = (window.promptLang === 'zh');
+    const sel = zh ? '[data-col="prompt-zh"]' : '[data-col="prompt"]';
+    const el = tr.querySelector(sel) || tr.querySelector('[data-col="prompt"]');
+    const text = el ? (el.value || '') : '';
+    const tag = zh ? '本镜提示词·中文' : '本镜提示词';
+    box.innerHTML = "<b style='color:#ebcb8b'>[" + tag + "]：</b>" +
+        (text ? text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))
+              : "<i style='color:#8c9ba5'>无提示词内容</i>");
 };
 
 window.openLightbox = function(url) {
@@ -1168,6 +1274,7 @@ window.saveToExcel = function() {
             dialogue: tr.querySelector('[data-col="dialogue"]')?.value || "",
             img: tr.querySelector('[data-col="img"]')?.value || "",
             prompt: tr.querySelector('[data-col="prompt"]')?.value || "",
+            prompt_zh: tr.querySelector('[data-col="prompt-zh"]')?.value || "",
             video: ""
         });
     }
@@ -1358,14 +1465,25 @@ window.sbsTrackDown = function(e, outer) {
     window.sbsImgSetProgress(outer, ratio >= 0.5 ? 1 : 0);
 };
 
+/* 【普通鼠标横向滑动】触控板可以两指左右划，鼠标只有一个纵向滚轮。
+   这里约定 Shift + 滚轮 = 横向滚动（和浏览器、Excel 的习惯一致，不抢任何系统快捷键）：
+     · 不按 Shift 时完全不动，纵向滚动照旧交给页面
+     · 没有横向溢出（表格本来就放得下）时也不拦，交还给浏览器 */
 document.addEventListener('wheel', function(e) {
     const viewport = document.getElementById('storyboardViewport');
     if (!viewport) return;
     if (!viewport.contains(e.target)) return;
-    if (e.shiftKey) {
-        e.preventDefault();
-        viewport.scrollLeft += e.deltaY;
-    }
+    if (!e.shiftKey) return;
+    if (viewport.scrollWidth - viewport.clientWidth <= 0) return;
+    e.preventDefault();
+    /* 滚轮事件的计量单位随平台/浏览器而变（W3C wheel 规范的 deltaMode）：
+         0 = 像素（macOS 触控板、Windows 上的 Chrome/Edge，一次约 ±100）
+         1 = 行  （Windows 上的 Firefox，一次只有 ±3）
+         2 = 页
+       直接拿原始值加给 scrollLeft，行模式下每次只挪 3px，等于没反应。
+       所以先归一化到像素：一行按 24px 估。 */
+    const unit = e.deltaMode === 1 ? 24 : (e.deltaMode === 2 ? viewport.clientWidth : 1);
+    viewport.scrollLeft += (e.deltaY || e.deltaX) * unit;
 }, { passive: false });
 
 setTimeout(applyScales, 500);
@@ -1730,10 +1848,17 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
                 btn_scale_save = gr.Button("📌 记住排版", scale=1)
                 btn_scale_reset = gr.Button("🔄 恢复默认", scale=1)
 
-            # 第三行：主提示词 + 右侧保存按钮（占地尽量小）
+            # 第三行：主提示词（独占整行）+ 右侧一列窄按钮组（中英切换 / 保存）
+            # 【为什么按钮塞进同一列】gradio 给每个 block 默认 320px 的 min-width，
+            # 切换按钮单独占一个 block 就会被撑到 320px，把预览框挤掉一半。
+            # 竖排在一列里，横向只占保存按钮那 132px。
             with gr.Row(elem_classes="prompt-save-row"):
-                gr.HTML("""<div id="masterPromptBox" class="master-prompt-preview"></div>""")
+                gr.HTML("""<div id="masterPromptBox" class="master-prompt-preview"></div>""",
+                        elem_classes="master-prompt-wrap")
                 with gr.Column(scale=0, elem_classes="save-btn-wrap"):
+                    gr.HTML("""<button class="prompt-lang-btn" onclick="togglePromptLang()"
+                        title="切换提示词预览的中英文（A/B 两个表共用同一状态）">中 / EN</button>""",
+                            scale=0)
                     btn_save_to_excel = gr.Button("💾 同步并保存到 Excel", variant="primary", elem_classes="save-btn")
 
             html_storyboard_view = gr.HTML("<div class='empty-tip'>等待加载工程数据...</div>")
@@ -1915,6 +2040,9 @@ def save_excel_api(req: SaveExcelRequest):
             ws.cell(row=r, column=6, value=row_data.get('prompt', ''))
             # 第 7 列（G）故意不写：网页上这一列是「视频结果」，按镜头号自动匹配、
             # 不读取文件内容；而 Sheet3 里 G 列是「视频动态提示词」，写空等于删数据。
+            # 第 8 列（H）是 F 列提示词的中文翻译，可编辑，照实写回。
+            if len(row_data) and ('prompt_zh' in row_data):
+                ws.cell(row=r, column=8, value=row_data.get('prompt_zh', ''))
         wb.save(app_core.excel_b_path)
         filename = os.path.basename(app_core.excel_b_path)
         if backup_path:
@@ -1979,6 +2107,29 @@ def _port_in_use(port: int, host: str = "0.0.0.0") -> bool:
             return True
 
 
+def _silence_heartbeat_log() -> None:
+    """把 /api/heartbeat 的访问日志从 uvicorn.access 里摘掉。
+
+    前端每 3 秒 ping 一次存活探针，一天约 2.9 万行。不打到终端不是为了省性能
+    （那条日志本身开销可以忽略），是为了让终端里只剩真正的请求和报错——
+    否则想翻一次保存失败的堆栈，得先滚过几千行心跳。
+
+    只过滤 access logger 的这条记录，其他请求（load / save / local_media）照常记录；
+    uvicorn 自己的启动/错误日志也不受影响。
+    """
+    import logging
+
+    class _DropHeartbeat(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                msg = record.getMessage()
+            except Exception:          # 格式化失败就别拦，宁可多打一行
+                return True
+            return "/api/heartbeat" not in msg
+
+    logging.getLogger("uvicorn.access").addFilter(_DropHeartbeat())
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -1994,4 +2145,5 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     print(f"▶ StoryBoardStudio 已启动 → http://localhost:{PORT}")
+    _silence_heartbeat_log()   # 必须在 uvicorn 建 logger 之后、开始服务之前挂上
     uvicorn.run(app, host="0.0.0.0", port=PORT)

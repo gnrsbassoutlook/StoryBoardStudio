@@ -84,20 +84,27 @@ _VARIANT_RE = re.compile(r"^([XYZ]\d{2})([A-Z]+)$")
 _COL_WIDTH = {
     "code": 96, "name": 150, "prompt": 250, "refaudio": 150,
     "voice": 256, "line": 272, "sound": 256, "other": 200,
+    "prompt_zh": 300,
 }
 # 右端两个固定预览列宽度（px）——**不参与 --a-scale 缩放**。
 # 原因：声音预览里的 <audio> 原生控件有个最小可用宽度，整表等比缩小后
 # 播放进度条会被挤没（用户实测：MacBook Air「更多内容」缩放下的典型症状）。
 # 这两列是工具列，保持恒定尺寸才能保证缩略图和播放条始终看得见。
+# 「提示词中文翻译」列（prompt_zh）排在它们**之后**：它恒定 300px、不计入
+# data-fixed-width，于是表格总宽会比视口宽一点 —— 窄屏要往右拖才能看到，
+# 大屏一次看全。这是刻意的：它不参与 auto-fit，就不会去挤中间那些内容列。
 _W_IMGVIEW, _W_AUDIOVIEW = 210, 300
+_W_PROMPTZH = _COL_WIDTH["prompt_zh"]
 
 # 各种列的文本域默认高度（px）。用户口径：偏矮一些，纵向一屏多看到几行。
-_TEXT_HEIGHT = {"prompt": 136, "voice": 106, "line": 92, "sound": 106, "other": 92}
+_TEXT_HEIGHT = {"prompt": 136, "voice": 106, "line": 92, "sound": 106, "other": 92,
+                "prompt_zh": 136}
 
 # 表头配色（沿用第二部分深色体系）
 _TH_CLASS = {
     "name": "a-col-name", "prompt": "a-col-text", "refaudio": "a-col-ref",
     "voice": "a-col-snd", "line": "a-col-snd", "sound": "a-col-snd",
+    "prompt_zh": "a-col-promptzh",
 }
 
 
@@ -311,6 +318,9 @@ def classify_columns(headers: list):
             kind = "code"
         elif "名称" in flat or "说明" in flat:
             kind = "name"
+        elif "中文翻译" in flat or "中文译文" in flat or "提示词翻译" in flat:
+            # 必须排在「提示词」之前：表头「提示词中文翻译」含「提示词」二字
+            kind = "prompt_zh"
         elif "参考音频" in flat or "参考音" in flat:
             kind = "refaudio"
         elif "台词" in flat:
@@ -419,14 +429,22 @@ def render_table_a_html(sheet: dict, img_idx: "MediaIndex", aud_idx: "MediaIndex
             continue
         body_cols.append((kind, title, ci))
 
+    # 「提示词中文翻译」列单独抽出来，渲染在声音预览**之后**（表格最末）。
+    # 它恒定 300px、不计入 data-fixed-width，所以窄屏时被挤出视口右缘（往右拖才看到），
+    # 大屏一次看全；也因为它不参与 auto-fit，不会把中间的内容列挤窄。
+    zh_cols = [(kind, title, ci) for kind, title, ci in body_cols if kind == "prompt_zh"]
+    body_cols = [(kind, title, ci) for kind, title, ci in body_cols if kind != "prompt_zh"]
+
     # ---- 列宽：显式 colgroup + 表格总宽，杜绝 table-layout:fixed 下的挤压 ----
     # 中间列 * --a-scale（可缩放）；右端两个预览列恒定 px（不缩放），
     # 所以表格总宽 = 中间之和 * scale + 固定宽度。
     scale_w = [_COL_WIDTH["code"]] + [_COL_WIDTH.get(k, 220) for k, _t, _c in body_cols]
     fixed_w = _W_IMGVIEW + _W_AUDIOVIEW
+    zh_w = _W_PROMPTZH * len(zh_cols)
     base_w = sum(scale_w)
     colgroup = "".join(f'<col style="width:calc({w}px * var(--a-scale))"/>' for w in scale_w)
     colgroup += f'<col style="width:{_W_IMGVIEW}px"/><col style="width:{_W_AUDIOVIEW}px"/>'
+    colgroup += "".join(f'<col style="width:{_W_PROMPTZH}px"/>' for _ in zh_cols)
 
     # ---- 表头：A.资产编号 / B.资产名称 / … 前缀用 Excel 真实列号 ----
     headers_html = [
@@ -439,6 +457,10 @@ def render_table_a_html(sheet: dict, img_idx: "MediaIndex", aud_idx: "MediaIndex
         )
     headers_html.append('<th class="a-col-imgview">📷 图片预览</th>')
     headers_html.append('<th class="a-col-audioview">🔊 声音预览</th>')
+    for _k, title, ci in zh_cols:
+        headers_html.append(
+            f'<th class="a-col-promptzh">{col_letter(ci)}.{_esc(title)}</th>'
+        )
 
     ref_ci = next((ci for kind, _t, ci in body_cols if kind == "refaudio"), None)
 
@@ -503,6 +525,14 @@ def render_table_a_html(sheet: dict, img_idx: "MediaIndex", aud_idx: "MediaIndex
         )
         cells.append(f'<td class="a-col-audioview"><div class="a-audio-stack">{cards}</div></td>')
 
+        # ---- 表格最末：提示词中文翻译（恒定宽，窄屏需横向拖动）----
+        for _k, _title, ci in zh_cols:
+            cells.append(
+                f'<td class="a-col-promptzh">'
+                f'{_text_box(_v(ci), "a-prompt a-prompt-zh", _TEXT_HEIGHT["prompt_zh"], ci, excel_row)}'
+                f'</td>'
+            )
+
         rows_html.append(
             f'<tr class="a-row" data-code="{_esc(code)}" data-row="{excel_row}" '
             f'onclick="onAssetRowClick(this)">' + "".join(cells) + "</tr>"
@@ -512,7 +542,7 @@ def render_table_a_html(sheet: dict, img_idx: "MediaIndex", aud_idx: "MediaIndex
         f'<div class="a-viewport" id="assetViewport" data-sheet-name="{_esc(sheet_name)}">'
         f'<table class="a-table" id="assetTable" data-base-width="{base_w}" '
         f'data-fixed-width="{fixed_w}" '
-        f'style="width:calc({base_w}px * var(--a-scale) + {fixed_w}px)">'
+        f'style="width:calc({base_w}px * var(--a-scale) + {fixed_w + zh_w}px)">'
         f'<colgroup>{colgroup}</colgroup>'
         f'<thead><tr>{"".join(headers_html)}</tr></thead>'
         f'<tbody>{"".join(rows_html)}</tbody></table></div>'
@@ -788,8 +818,43 @@ ASSET_CSS = """
 .a-stats-box::-webkit-scrollbar { width: 6px; }
 .a-stats-box::-webkit-scrollbar-thumb { background: #3b4252; border-radius: 3px; }
 
-/* 表格 A 的「整行大字」预览框：比第二部分矮一些，给表格多留点纵向空间 */
-#masterBoxA { height: 62px; }
+/* 表格 A 的「整行大字」预览框：与第二部分 masterPromptBox 同高（90px），
+   六段式提示词太长，62px 看不全 */
+#masterBoxA { height: 90px; }
+
+/* 表格最末的「提示词中文翻译」列：恒定宽、不参与缩放。
+   排在声音预览之后，所以窄屏时被挤出视口右缘（拖底部的横向滚动条才看到），
+   大屏一次看全 —— 这是刻意的，它不占日常视野。 */
+.a-table thead th.a-col-promptzh {
+    background: #262c37;
+    box-shadow: -1px 0 0 #2e3440;
+    color: #d7c08a;
+}
+.a-table tbody td.a-col-promptzh { background: #1b1f27; }
+.a-table tbody td.a-col-promptzh textarea {
+    font-size: 12px;
+    line-height: 1.6;
+    color: #cfd6e4;
+}
+
+/* 中英文切换按钮：与「保存到 Excel」竖排在同一列，
+   横向只占保存按钮那一列宽度，不再单独抢一个 320px 的 block */
+.prompt-lang-btn {
+    display: block;
+    width: 100%;
+    flex-shrink: 0;
+    min-height: 26px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid #3b4252;
+    background: #2a3039;
+    color: #ebcb8b;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.prompt-lang-btn:hover { background: #333b47; }
 
 .a-row:hover { background-color: #1a1e27; }
 .a-row.a-selected { background-color: #242e3f !important; }
@@ -1102,18 +1167,52 @@ window.aResetScale = function() {
     showToast('资产表已恢复默认排版', 'success');
 };
 
-/* 点行 → 上方大字看整行文本（与第二部分的 masterPromptBox 同款体验） */
+/* ---------- 提示词预览：中英文切换（表格 A / B 共用一套状态） ----------
+   语言只影响上方「整行大字」预览框看哪种文字，不改表格本身的内容；
+   状态存 localStorage，两个 tab 来回切也是同一个语言。 */
+window.promptLang = localStorage.getItem('promptLang') || 'en';
+window.setPromptLang = function(lang) {
+    window.promptLang = (lang === 'zh') ? 'zh' : 'en';
+    localStorage.setItem('promptLang', window.promptLang);
+    if (typeof window.aRenderMaster === 'function') window.aRenderMaster();
+    if (typeof window.sbsRenderMaster === 'function') window.sbsRenderMaster();
+};
+window.togglePromptLang = function() {
+    window.setPromptLang(window.promptLang === 'zh' ? 'en' : 'zh');
+};
+
+/* 点行 → 上方大字看整行文本（与第二部分的 masterPromptBox 同款体验）。
+   中文模式下用「提示词中文翻译」列顶替正文提示词列，其余列照旧。 */
+window.aSelectedRow = null;
 window.onAssetRowClick = function(tr) {
+    window.aSelectedRow = tr;
     document.querySelectorAll('tr.a-row').forEach(r => r.classList.remove('a-selected'));
     tr.classList.add('a-selected');
-    const code = tr.dataset.code || '';
-    const boxes = tr.querySelectorAll('textarea.a-text');
-    let parts = [];
-    boxes.forEach(b => { if (b.value.trim()) parts.push(b.value); });
+    window.aRenderMaster();
+};
+
+window.aRenderMaster = function() {
     const box = document.getElementById('masterBoxA');
     if (!box) return;
+    const tr = window.aSelectedRow;
+    const zh = (window.promptLang === 'zh');
+    if (!tr) {
+        box.innerHTML = "<i style='color:#8c9ba5'>点击任意一行，这里显示该行全部文本　·　没有触控板？按住 Shift 滚滚轮可左右滑动</i>";
+        return;
+    }
+    const code = tr.dataset.code || '';
+    let parts = [];
+    tr.querySelectorAll('textarea.a-text').forEach(b => {
+        const isZhCol = b.classList.contains('a-prompt-zh');
+        const isPromptCol = b.classList.contains('a-prompt');
+        if (isZhCol && !zh) return;                 // 英文模式：跳过中文翻译列
+        if (isPromptCol && !isZhCol && zh) return;  // 中文模式：跳过英文正文列
+        if (b.value.trim()) parts.push(b.value);
+    });
     box.textContent = '';
-    box.insertAdjacentHTML('beforeend', "<b style='color:#88c0d0'>[" + code + "]</b> ");
+    box.insertAdjacentHTML('beforeend',
+        "<b style='color:#88c0d0'>[" + code + "]</b> " +
+        "<span style='color:#8c9ba5;font-size:11px'>" + (zh ? '中文' : 'EN') + "</span> ");
     if (parts.length) {
         const span = document.createElement('span');
         span.style.whiteSpace = 'pre-wrap';
@@ -1229,14 +1328,19 @@ window.switchSbsTab = function(keyword) {
     return sbsSwitchTab((keyword || '').indexOf('A') >= 0 ? 'A' : 'B');
 };
 
-/* Shift + 滚轮 → 资产表横向滚动（与第二部分同款手感） */
+/* Shift + 滚轮 → 资产表横向滚动（与第二部分同款手感）。
+   普通鼠标没有横向滚轮，用 Shift 是浏览器/Excel 的通用约定，不抢系统快捷键。
+   不按 Shift 时一律不管，纵向滚动照旧。 */
 document.addEventListener('wheel', function(e) {
     const vp = document.getElementById('assetViewport');
     if (!vp || !vp.contains(e.target)) return;
-    if (e.shiftKey) {
-        e.preventDefault();
-        vp.scrollLeft += e.deltaY;
-    }
+    if (!e.shiftKey) return;
+    if (vp.scrollWidth - vp.clientWidth <= 0) return;
+    e.preventDefault();
+    /* deltaMode：0 像素 / 1 行 / 2 页。Windows 的 Firefox 走"行"模式，
+       原始值只有 ±3，直接加等于没反应，所以统一折算成像素（一行 24px）。 */
+    const unit = e.deltaMode === 1 ? 24 : (e.deltaMode === 2 ? vp.clientWidth : 1);
+    vp.scrollLeft += (e.deltaY || e.deltaX) * unit;
 }, { passive: false });
 
 /* 窗口尺寸变化（含 MacBook「更多内容」这类分辨率切换）后重算一次 */
@@ -1315,10 +1419,18 @@ def build_asset_tab(txt_path_a, txt_asset_dir, txt_audio_dir, btn_load_project,
             a_save = gr.Button("📌 记住排版", scale=1)
             a_reset = gr.Button("🔄 恢复默认", scale=1)
 
+        # 预览大框独占整行；中英切换与保存按钮竖排在同一列窄按钮组里。
+        # 【为什么这么做】gradio 给每个 block 默认 320px 的 min-width，
+        # 切换按钮单独占一个 block 就会被撑到 320px，把预览框挤掉一半。
         with gr.Row(elem_classes="prompt-save-row"):
-            gr.HTML("""<div id="masterBoxA" class="master-prompt-preview"></div>""")
-            a_save_excel = gr.Button("💾 同步并保存到 Excel", variant="primary",
-                                     scale=0, elem_classes="save-btn")
+            gr.HTML("""<div id="masterBoxA" class="master-prompt-preview"></div>""",
+                    elem_classes="master-prompt-wrap")
+            with gr.Column(scale=0, elem_classes="save-btn-wrap"):
+                gr.HTML("""<button class="prompt-lang-btn" onclick="togglePromptLang()"
+                    title="切换提示词预览的中英文（A/B 两个表共用同一状态）">中 / EN</button>""",
+                        scale=0)
+                a_save_excel = gr.Button("💾 同步并保存到 Excel", variant="primary",
+                                         elem_classes="save-btn")
 
         html_asset_view = gr.HTML(
             "<div class='a-empty'>等待加载资产表…<br>"
