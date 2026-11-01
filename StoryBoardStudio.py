@@ -193,17 +193,20 @@ def find_matching_video(shot_id: str, video_paths: list):
             return path
     return None
 
-# C列「严格代表时长」（模式2）的写法：12 / 12.5 / 12f / 12s（容忍数字与 f/s 之间多余空格）
+# C列「严格代表时长」（模式1 全参考）的写法：12 / 12.5 / 12f / 12s（容忍数字与 f/s 之间多余空格）
 DURATION_PATTERN = re.compile(r'^\d+(\.\d+)?\s*[fFsS]?$')
 # 镜头号与描述之间的分隔符（口径与 find_matching_video 一致）
 _MATCH_SEPARATORS = {'.', '-', '_', ' '}
 
 def is_duration_value(text: str) -> bool:
-    """C列是否「严格代表时长」（模式2）。
+    """C列是否「严格代表时长」（模式1 全参考）。
 
     只有纯数字、数字+f、数字+s 才算（数字可以是任意浮点数：12、2.8、12.75、0.5）。
-    `n/a`、`mode_1`、`mode_A`、`模式1` 这类模式1 的标记不是数字，不会被这里吃掉 ——
+    `n/a`、`mode_2`、`mode_B`、`模式2` 这类数字人模式的标记不是数字，不会被这里吃掉 ——
     它们会原样显示在单元格里；也不会有任何值让界面报错。
+
+    口径（2026-11-01 统一）：模式1 = 全参考（C 填时长）；模式2 = 数字人（C 填镜头号）。
+    代码只看 C 列内容是不是数字，不看模式编号，所以编号只影响文案，不影响行为。
     """
     return bool(DURATION_PATTERN.match((text or "").strip()))
 
@@ -273,10 +276,10 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         shot_id = str(row.iloc[0]) if len(row) > 0 and pd.notna(row.iloc[0]) else f"Sht{idx+1:02d}"
         title = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
         
-        # C列：双模式兼容
-        #  · 纯数字 / 数字+f / 数字+s → 严格视为「时长」（模式2），只显示数字本身，不找音频
-        #  · n/a、mode_1、模式1 等     → 模式1 的标记，原样显示，不当时长解析
-        #  · 其余（通常是镜头号）       → 模式1，原样显示，并按镜头号模糊匹配音频挂播放条
+        # C列：双模式兼容（模式1 全参考 / 模式2 数字人）
+        #  · 纯数字 / 数字+f / 数字+s → 模式1「全参考」，C 列就是镜头时长，只显示数字本身，不找音频
+        #  · n/a、mode_2、模式2 等     → 模式2 的标记（无对应音频），原样显示，不当时长解析
+        #  · 其余（通常是镜头号）       → 模式2「数字人」，原样显示，并按镜头号匹配音频挂播放条
         c_content = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
         c_content_strip = c_content.strip()
         
@@ -287,7 +290,7 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                 <span class="dur-value">{html.escape(format_duration_text(c_content_strip))}</span>
             </div>"""
         else:
-            # 模式1：匹配候选 C 列自身优先（常直接填镜头号），A 列镜头号兜底（填 n/a 等标记时）
+            # 模式2 数字人：匹配候选 C 列自身优先（常直接填镜头号），A 列镜头号兜底（填 n/a 等标记时）
             audio_path = ""
             for candidate in (c_content_strip, shot_id):
                 audio_path = find_matching_audio(candidate, audio_index)
@@ -421,8 +424,8 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
                 <tr>
                     <th class="col-shot">A.镜头号</th>
                     <th class="col-title">B.小标题</th>
-                    <th class="col-dur">C.音频结果（模式1）/镜头时长（模式2）</th>
-                    <th class="col-dialogue">D.台词内容（模式1）/台词角色（模式2）</th>
+                    <th class="col-dur">C.镜头时长（模式1 全参考）/音频结果（模式2 数字人）</th>
+                    <th class="col-dialogue">D.台词内容 / 台词角色（两模式共用）</th>
                     <th class="col-img">E.图片资产</th>
                     <th class="col-prompt">F.生视频提示词</th>
                     <th class="col-video">G.视频结果</th>
