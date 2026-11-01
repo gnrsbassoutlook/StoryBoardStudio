@@ -609,46 +609,41 @@ CUSTOM_CSS = """
     scroll-behavior: smooth;
 }
 
-/* 【悬停显形的滚动条】
-   macOS 默认 overlay 滚动条只在滑动瞬间露一下，普通鼠标既看不到也点不到；
-   而做成常驻又会永久吃掉十几像素高度，表格就少看半行。
-   折中：给元素显式写 ::-webkit-scrollbar 让浏览器切成可自定义样式，
-   平时把滑轨和滑块都设成全透明（视觉上等于没有），
-   鼠标移到表格区域（:hover）才点亮。
-   —— 不占视觉，但想拖的时候一定找得到。 */
+/* 【常显的细滚动条】
+   之前是「平时全透明、悬停才点亮」，但 macOS 的 overlay 滚动条由系统
+   「滚动时才显示」控制：普通鼠标既看不到，悬停也不亮，只有触控板滑动那一下才闪出来。
+   改成常显：thumb 平时就是灰的，悬停略提亮。
+   ::-webkit-scrollbar 一旦生效就会占位（9px），这是让滚动条点得到的必要代价。 */
 .storyboard-viewport::-webkit-scrollbar,
-.a-viewport::-webkit-scrollbar { width: 8px; height: 8px; }
+.a-viewport::-webkit-scrollbar { width: 9px; height: 9px; }
 
 .storyboard-viewport::-webkit-scrollbar-track,
-.a-viewport::-webkit-scrollbar-track { background: transparent; }
+.a-viewport::-webkit-scrollbar-track { background: #14161b; border-radius: 4px; }
 
 .storyboard-viewport::-webkit-scrollbar-thumb,
 .a-viewport::-webkit-scrollbar-thumb {
-    background: transparent;
+    background: #4a5260;
     border-radius: 4px;
     border: 2px solid transparent;
     background-clip: padding-box;
+    min-height: 36px;
 }
 
-/* 悬停在视口内才显形 */
-.storyboard-viewport:hover::-webkit-scrollbar-thumb,
-.a-viewport:hover::-webkit-scrollbar-thumb {
-    background: #5b6675;
-    background-clip: padding-box;
-}
-
-.storyboard-viewport:hover::-webkit-scrollbar-thumb:hover,
-.a-viewport:hover::-webkit-scrollbar-thumb:hover {
-    background: #78828f;
+.storyboard-viewport::-webkit-scrollbar-thumb:hover,
+.a-viewport::-webkit-scrollbar-thumb:hover {
+    background: #6d7684;
     background-clip: padding-box;
 }
 
 .storyboard-viewport::-webkit-scrollbar-corner,
-.a-viewport::-webkit-scrollbar-corner { background: transparent; }
+.a-viewport::-webkit-scrollbar-corner { background: #14161b; }
 
-/* Firefox（顺带，不影响 Chrome/Safari） */
-.storyboard-viewport, .a-viewport { scrollbar-width: thin; scrollbar-color: transparent transparent; }
-.storyboard-viewport:hover, .a-viewport:hover { scrollbar-color: #5b6675 transparent; }
+/* Firefox 走标准属性。必须用 @supports 隔离：
+   Chromium 也认 scrollbar-width/scrollbar-color，一旦生效就会忽略上面的
+   ::-webkit-scrollbar 定制，白条又变回「看不见」。 */
+@supports not selector(::-webkit-scrollbar) {
+    .storyboard-viewport, .a-viewport { scrollbar-width: thin; scrollbar-color: #4a5260 #14161b; }
+}
 
 
 .storyboard-table {
@@ -698,10 +693,10 @@ CUSTOM_CSS = """
    默认直接给 86px，等于替用户先按了那一次 h。 */
 .col-shot { width: calc(86px * var(--col-scale)); }
 .col-title { width: calc(130px * var(--col-scale)); }
-/* C 列：模式1 只放时长数字，模式2 放一个原生 audio。
-   220px 对纯数字是浪费（横向要滚动），160px 刚好容下
-   播放/暂停 + 进度条；超出部分交给内部 flex 自适应压缩。 */
-.col-dur { width: calc(160px * var(--col-scale)); }
+/* C 列：模式1 只放「4.0」这种数字 + 一个输入框，模式2 放一个原生 audio。
+   220 → 160 还嫌宽，再收到 140：数字一行就够，播放/暂停 + 短进度条也塞得下。
+   真正吃横向的是 D/E/F，不该让一个纯数字列占 160。 */
+.col-dur { width: calc(140px * var(--col-scale)); }
 .col-dialogue { width: calc(190px * var(--col-scale)); }
 .col-img { width: calc(290px * var(--col-scale)); }
 .col-prompt { width: calc(330px * var(--col-scale)); }
