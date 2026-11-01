@@ -692,9 +692,16 @@ CUSTOM_CSS = """
 }
 
 /* 列宽 */
-.col-shot { width: calc(72px * var(--col-scale)); }
+/* A 列：必须一次显示完整镜头号 s001-01（7 字符等宽 13px ≈ 55px）。
+   72px 扣掉单元格与输入框内边距只剩约 50px，末位会被裁掉，
+   逼得用户按一次 h（col-scale 1.1 → 79px）才看得全。
+   默认直接给 86px，等于替用户先按了那一次 h。 */
+.col-shot { width: calc(86px * var(--col-scale)); }
 .col-title { width: calc(130px * var(--col-scale)); }
-.col-dur { width: calc(220px * var(--col-scale)); }
+/* C 列：模式1 只放时长数字，模式2 放一个原生 audio。
+   220px 对纯数字是浪费（横向要滚动），160px 刚好容下
+   播放/暂停 + 进度条；超出部分交给内部 flex 自适应压缩。 */
+.col-dur { width: calc(160px * var(--col-scale)); }
 .col-dialogue { width: calc(190px * var(--col-scale)); }
 .col-img { width: calc(290px * var(--col-scale)); }
 .col-prompt { width: calc(330px * var(--col-scale)); }
@@ -921,14 +928,20 @@ CUSTOM_CSS = """
     height: 28px;
     width: 100%;
     flex: 1;
-    min-width: 120px;
+    /* C 列收到 160px 后，120px 的硬下限会把进度条挤出格子。
+       交给 flex 压缩：play/pause 与进度条始终在框内。 */
+    min-width: 0;
 }
 
 .asset-badge-audio {
     font-size: 10px;
     color: #a3be8c;
     font-weight: bold;
-    min-width: 36px;
+    min-width: 0;
+    max-width: 46px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     flex-shrink: 0;
 }
 
