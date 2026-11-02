@@ -36,15 +36,26 @@ def load_config():
                 return json.load(f)
         except:
             pass
-    return {"path_a": "", "path_b": "", "asset_dir": "", "video_dir": "", "audio_dir": ""}
+    return {"path_a": "", "path_b": "", "asset_dir": "", "video_dir": "", "audio_dir": "",
+            "audio_b_dir": "", "b_mode": "auto"}
 
-def save_config(path_a, path_b, asset_dir, video_dir, audio_dir):
+def save_config(path_a, path_b, asset_dir, video_dir, audio_dir, b_mode=None, audio_b_dir=None):
+    # b_mode / audio_b_dir 传 None ＝「这次不动它」。路径框的 change/blur 会频繁调本函数，
+    # 若每次都带一个默认值回写，用户刚切好的模式会被下一次失焦悄悄改回 auto，
+    # 刚填的模式2 音频路径也会被另一个框的失焦冲掉。
+    _old = load_config()
+    if b_mode is None:
+        b_mode = _old.get("b_mode", "auto")
+    if audio_b_dir is None:
+        audio_b_dir = _old.get("audio_b_dir", "")
     data = {
         "path_a": path_a,
         "path_b": path_b,
         "asset_dir": asset_dir,
         "video_dir": video_dir,
         "audio_dir": audio_dir,
+        "audio_b_dir": audio_b_dir,
+        "b_mode": b_mode,
     }
     # 内容没变就不落盘。每次打开 / 刷新页面都会回填一次路径框，那会触发 change 事件；
     # 没有这道闸门的话，每次刷新都重写一遍同样内容的 config.json，白白刷新文件时间。
@@ -118,12 +129,14 @@ def media_url_b(path: str) -> str:
         t = 0
     return f"/api/local_media?filepath={urllib.parse.quote(path)}&_t={t}"
 
-def _build_index_and_conflicts(root_dir: str, valid_exts: set):
+def _build_index_and_conflicts(root_dir: str, valid_exts: set, ext_rank: dict = None):
     index = {}
     conflicts = []
     if not root_dir or not os.path.isdir(root_dir):
         return index, conflicts
-    
+
+    index_rank = {}
+
     code_groups = {}
     # 仅匹配X/Y/Z开头+数字的资产编码，可选后缀字母
     prefix_pattern = re.compile(r"^([XYZxyz]\d+[a-zA-Z]?)[._\-]")
@@ -149,6 +162,17 @@ def _build_index_and_conflicts(root_dir: str, valid_exts: set):
             full_code = file_name_no_ext.upper()
             if full_code not in index:
                 index[full_code] = full_path
+                index_rank[full_code] = ext_rank.get(ext, 99) if ext_rank else 0
+            elif ext_rank and ext_rank.get(ext, 99) < index_rank.get(full_code, 99):
+                # 同一镜同时有 s001-01.wav 和 s001-01.mp3 时，原来「谁先被 os.walk 走到用谁」，
+                # 换台机器 / 改个文件名就可能换一个。改成按容器优先级确定性地取一个。
+                index[full_code] = full_path
+                index_rank[full_code] = ext_rank.get(ext, 99)
+            # 音频另登记一条「带扩展名的全名」键（`S001-01.WAV`）。
+            # 因为 C 列允许直接写文件名：写了 `s001-01.mp3` 就该给 mp3，
+            # 不能因为索引里 wav 优先级更高就把它换掉 —— 那是**用户明确指定**，不是自动匹配。
+            if ext_rank:
+                index.setdefault(f"{full_code}{ext.upper()}", full_path)
     
     # 生成索引与冲突列表
     for code, file_list in code_groups.items():
@@ -164,9 +188,13 @@ def build_image_index(asset_dir: str):
     valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff'}
     return _build_index_and_conflicts(asset_dir, valid_exts)
 
+AUDIO_VALID_EXTS = {'.mp3', '.wav', '.aac', '.m4a', '.flac'}
+# 同一镜存在多个容器时的取用顺序：无损优先。写在文档里的好处是「换了机器结果一样」。
+# 界面上 badge 会显示真实文件名（含扩展名），用的是哪一个一眼可见，不需要猜。
+AUDIO_EXT_RANK = {'.wav': 0, '.flac': 1, '.mp3': 2, '.m4a': 3, '.aac': 4}
+
 def build_audio_index(audio_dir: str):
-    valid_exts = {'.mp3', '.wav', '.aac', '.m4a', '.flac'}
-    return _build_index_and_conflicts(audio_dir, valid_exts)
+    return _build_index_and_conflicts(audio_dir, AUDIO_VALID_EXTS, AUDIO_EXT_RANK)
 
 def build_video_list(video_dir: str):
     video_paths = []
@@ -241,6 +269,86 @@ def find_matching_audio(shot_id: str, audio_index: dict):
         return audio_index[hits[0]]
     return ""
 
+def audio_keys_from(c_value: str, shot_id: str) -> list:
+    """把 C 列的内容翻译成「可以拿去查音频索引的键」，按优先级排。
+
+    三种填法都认，所以 C 列填什么都不会掉链子：
+      1. 空 / `-` / `n/a`     → 用 A 列镜头号（最常见的状态：还没回填）
+      2. `s001-01`            → 就是镜头号，直接用
+      3. `s001-01.wav`        → 去掉扩展名再查（不写死容器，换格式也不用改表）
+    """
+    keys = []
+    for raw in (c_value, shot_id):
+        s = (raw or "").strip()
+        if not s or s in ("-", "0", "N/A", "n/a", "NA"):
+            continue
+        base, ext = os.path.splitext(s)
+        if ext.lower() in AUDIO_VALID_EXTS:
+            s = base
+        if s and s.upper() not in [k.upper() for k in keys]:
+            keys.append(s)
+    return keys
+
+def resolve_audio(c_value: str, shot_id: str, audio_index: dict):
+    """返回 (音频绝对路径, 匹配方式)。匹配方式：`exact` / `fuzzy` / `""`。
+
+    分成两级而不是一律模糊：`s001-01.何功伟的话.mp3` 这种带描述后缀的会自动挂上（方便），
+    但它**必须被看得见**——界面 badge 会标「≈」，否则同号多文件时你分不清挂的是哪一条。
+    """
+    # ① C 列明确写了扩展名（`s001-01.mp3`）时，那条就是**指定**，优先级高于同号的无损版本。
+    raw = (c_value or "").strip()
+    if raw and os.path.splitext(raw)[1].lower() in AUDIO_VALID_EXTS:
+        k = raw.upper()
+        if k in audio_index:
+            return audio_index[k], "exact"
+    # ② 没写扩展名 / 空着：按镜头号查，同号多容器由索引里的优先级决定（wav > flac > mp3）
+    for key in audio_keys_from(c_value, shot_id):
+        k = key.strip().upper()
+        if not k or not audio_index:
+            continue
+        if k in audio_index:
+            return audio_index[k], "exact"
+    for key in audio_keys_from(c_value, shot_id):
+        k = key.strip().upper()
+        hits = [x for x in audio_index
+                if x.startswith(k) and len(x) > len(k) and x[len(k)] in _MATCH_SEPARATORS]
+        if hits:
+            hits.sort(key=natural_sort_key)
+            return audio_index[hits[0]], "fuzzy"
+    return "", ""
+
+SHOT_ID_RE = re.compile(r'^[sS]\d{2,4}-\d{2,3}')
+# 生成模式：C 列到底代表什么，只能由「这份表是哪一份」决定，不能逐格猜。
+#   auto          抽 C 列判断（打开旧表 / 没配过也能用）
+#   ref2v         模式1 全参考：C 永远是时长，不去音频目录找东西
+#   digital_human 模式2 声音驱动：C 永远是音频线索（镜头号或文件名）
+B_MODES = ("auto", "ref2v", "digital_human")
+
+def detect_table_mode(df) -> str:
+    """看 C 列填的是时长还是镜头号，判断这份表是模式1 还是模式2。
+
+    只做一次抽样统计（前 60 个非空），不逐格判断——逐格判断就会出现
+    「一行是 3.5 秒、下一行是 s001-02」这种同一列两种解释的表，正是界面混乱的根源。
+    """
+    if df is None or df.empty or len(df.columns) < 3:
+        return "ref2v"
+    dur = shot = 0
+    for v in df.iloc[:60, 2].tolist():
+        s = str(v).strip() if pd.notna(v) else ""
+        if not s:
+            continue
+        if is_duration_value(s):
+            dur += 1
+        elif SHOT_ID_RE.match(s):
+            shot += 1
+    return "digital_human" if shot > dur else "ref2v"
+
+def resolve_table_mode(mode: str, df) -> str:
+    m = (mode or "auto").strip()
+    if m not in B_MODES:
+        m = "auto"
+    return detect_table_mode(df) if m == "auto" else m
+
 def backup_excel(filepath: str, asset_dir: str = ""):
     """保存写回前先备份原 Excel。
 
@@ -266,9 +374,13 @@ def backup_excel(filepath: str, asset_dir: str = ""):
 # ==============================
 # 2. 核心表格渲染引擎（D/E列互换）
 # ==============================
-def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
+def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name, b_mode="auto", audio_hint=""):
     if df is None or df.empty:
         return "<div class='empty-tip'>暂无数据或工作表为空</div>"
+
+    mode = resolve_table_mode(b_mode, df)
+    n_shots = len(df)
+    n_audio = 0
 
     rows_html = []
 
@@ -276,38 +388,40 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
         shot_id = str(row.iloc[0]) if len(row) > 0 and pd.notna(row.iloc[0]) else f"Sht{idx+1:02d}"
         title = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
         
-        # C列：双模式兼容（模式1 全参考 / 模式2 数字人）
-        #  · 纯数字 / 数字+f / 数字+s → 模式1「全参考」，C 列就是镜头时长，只显示数字本身，不找音频
-        #  · n/a、mode_2、模式2 等     → 模式2 的标记（无对应音频），原样显示，不当时长解析
-        #  · 其余（通常是镜头号）       → 模式2「数字人」，原样显示，并按镜头号匹配音频挂播放条
+        # C列：语义由 mode 决定，不再逐格猜。
+        #  · 模式1（ref2v）  C 就是镜头时长，数字原样显示，**不去音频目录找任何东西**
+        #  · 模式2（digital_human） C 是音频线索：填了文件名就按文件名、空着就按 A 列镜头号，
+        #    在音频目录里找同号文件（mp3/wav/flac/aac/m4a），找到挂播放条、找不到显示「未配音」
         c_content = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
         c_content_strip = c_content.strip()
-        
+
         c_cell_top = ""
-        if is_duration_value(c_content_strip):
+        if mode == "ref2v":
             c_cell_top = f"""
             <div class="dur-text">
                 <span class="dur-value">{html.escape(format_duration_text(c_content_strip))}</span>
             </div>"""
         else:
-            # 模式2 数字人：匹配候选 C 列自身优先（常直接填镜头号），A 列镜头号兜底（填 n/a 等标记时）
-            audio_path = ""
-            for candidate in (c_content_strip, shot_id):
-                audio_path = find_matching_audio(candidate, audio_index)
-                if audio_path:
-                    break
+            audio_path, match_kind = resolve_audio(c_content_strip, shot_id, audio_index)
             if audio_path:
+                n_audio += 1
                 file_url = media_url_b(audio_path)
-                badge_text = html.escape(c_content_strip or shot_id)
+                # C 列只有 140px，塞不下整个文件名（长了会把进度条挤没）。
+                # 所以 badge 只放**容器扩展名**（WAV/FLAC/MP3），完整文件名放 title 悬停可见，
+                # 下方那个 raw-text 输入框本来就是给回填用的，也不占额外空间。
+                base_name = os.path.basename(audio_path)
+                ext_tag = (os.path.splitext(base_name)[1].lstrip(".") or "aud").upper()
+                approx = ("<span class='audio-fuzzy' title='没有同名文件，按前缀近似匹配到这一条'>≈</span>"
+                          if match_kind == "fuzzy" else "")
                 c_cell_top = f"""
                 <div class="audio-card single-audio">
-                    <span class="asset-badge-audio">{badge_text}</span>
+                    <span class="asset-badge-audio ext-{ext_tag.lower()}" title="{html.escape(base_name)}">{approx}{html.escape(ext_tag)}</span>
                     <audio controls preload="auto" src="{file_url}" class="audio-player" onclick="event.stopPropagation()" playsinline>
                 </div>"""
             else:
-                c_cell_top = f"""
-                <div class="dur-text">
-                    <span class="dur-value">{html.escape(c_content_strip)}</span>
+                c_cell_top = """
+                <div class="audio-missing" title="音频目录里没有这一镜的同名文件（mp3/wav/flac）">
+                    <span>未配音</span>
                 </div>"""
         
         c_cell = f"""
@@ -422,14 +536,32 @@ def render_table_b_html(df, image_index, audio_index, video_paths, sheet_name):
 
     table_body = "".join(rows_html)
 
+    # 表头也要跟着模式变。原来写「镜头时长 / 音频结果」是想两头都照顾，
+    # 结果两头都不清楚——现在模式在页面顶部就选定了，表头就说明白话。
+    # 模式不再重复标在表格上方：那是顶部下拉菜单的职责。
+    if mode == "ref2v":
+        c_head = "C.镜头时长 (s)"
+        stat = f"<span class='stat-item'>本场 {n_shots} 镜</span>"
+    else:
+        c_head = "C.音频文件（按镜头号匹配 · mp3/wav/flac）"
+        miss = n_shots - n_audio
+        miss_cls = "stat-miss" if miss else "stat-ok"
+        stat = (f"<span class='stat-item'>本场 {n_shots} 镜 · 已配音 {n_audio}</span>"
+                f"<span class='stat-item {miss_cls}'>未配音 {miss}</span>")
+        # 一行「现在到底在哪个目录里找」。没配音的镜头，八成是第一眼就该确认这件事，
+        # 而不是猜「是不是没填对路径」。路径太长会撑破行，所以用 ellipsis + 悬停看全。
+        if audio_hint:
+            stat += f"<span class='stat-hint' title='{html.escape(audio_hint)}'>{html.escape(audio_hint)}</span>"
+
     return f"""
-    <div class="storyboard-viewport" id="storyboardViewport" data-sheet-name="{sheet_name}">
+    <div class="sheet-stat-bar" title="C 列怎么解释由页面顶部的「生成模式」下拉决定；未配音的格子会在表格里显示成灰块">{stat}</div>
+    <div class="storyboard-viewport" id="storyboardViewport" data-sheet-name="{sheet_name}" data-b-mode="{mode}">
         <table class="storyboard-table" id="storyboardTable">
             <thead>
                 <tr>
                     <th class="col-shot">A.镜头号</th>
                     <th class="col-title">B.小标题</th>
-                    <th class="col-dur">C.镜头时长（模式1 全参考）/音频结果（模式2 数字人）</th>
+                    <th class="col-dur">{c_head}</th>
                     <th class="col-dialogue">D.台词内容 / 台词角色（两模式共用）</th>
                     <th class="col-img">E.图片资产</th>
                     <th class="col-prompt">F.生视频提示词</th>
@@ -477,6 +609,10 @@ CUSTOM_CSS = """
     line-height: 1.5;
 }
 .conflict-panel:empty { display: none; }
+/* 【空着就彻底消失】`.conflict-panel:empty{display:none}` 只藏了里面的 div，
+   外面那层 gradio block 仍有 padding，白占 20px 一屏高的空隙。这里连壳一起收掉。
+   只在「有内容」时才出现（冲突提示本来就是偶发信息）。 */
+.conflict-wrap:has(.conflict-panel:empty) { display: none !important; }
 .conflict-panel .conflict-item {
     display: block;
     margin-bottom: 2px;
@@ -502,40 +638,201 @@ CUSTOM_CSS = """
 .toast-error { background: #5c2e2e; color: #f8d7da; border: 1px solid #7a3a3a; }
 .toast-show { opacity: 1; top: 30px; }
 
+/* 顶部路径行：一行到底，绝不折行（用户要的是「不占纵向空间」）。 */
+.path-row {
+    flex-wrap: nowrap !important;
+    align-items: flex-end;
+    gap: 6px;
+}
+/* gradio 默认给每个 block 320px 最小宽度，七个框必然换行。
+   这里把最小宽度归零，宽度只由 scale 决定。 */
+.path-row > *,
+.path-row .block,
+.path-row .form {
+    min-width: 0 !important;
+}
+/* gradio 把这一行的组件又包了一层 div，真正分宽度的是那层；
+   按钮必须 flex:0 0 auto + 最小宽度，否则 nowrap 下会被压成一条竖线（实测 12px）。 */
+.path-row > div {
+    min-width: 0 !important;
+    flex: 1 1 auto;
+}
+/* 只钉住「加载/刷新」这一个按钮。别写 .path-row button，那会连路径框里的
+   📁 选择按钮一起撑宽（它是 26px 的小图标）。 */
+.path-go-btn {
+    flex: 0 0 auto !important;
+    min-width: 96px !important;
+    align-self: center;
+    height: 32px !important;
+    min-height: 32px !important;
+}
+/* 压薄这一行：gradio 默认 label 占 20px + 8px 间距，block 再各带一圈 padding，
+   加起来 90px 高。这里收到 ~58px，横向不折行、纵向也不白占一屏。 */
+.path-row .block {
+    padding: 2px 4px !important;
+}
+.path-row label {
+    margin-bottom: 0 !important;
+}
+.path-row label > span,
+.path-row .label-wrap span {
+    margin-bottom: 2px !important;
+    line-height: 14px !important;
+}
+.path-row label,
+.path-row .label-wrap {
+    font-size: 11px !important;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.path-row input[type="text"] {
+    font-size: 11px !important;
+    padding: 4px 6px !important;
+    height: 30px !important;
+    min-width: 0 !important;
+}
+/* 下拉（B表模式）的显示文字也压到 11px：它默认 14px，六个字在窄框里会露半个字 */
+.path-row [role="combobox"],
+.path-row .wrap-inner input,
+.path-row .secondary-wrap input {
+    font-size: 11px !important;
+    min-width: 0 !important;
+}
+/* 【B表模式下拉精确定宽】宽度只要「模式1 全参考」六个字 + 箭头 + 两侧留白，
+   多出来的每一像素都是从路径框里抢的。
+   ⚠️ 只用后代选择器，**绝不能写 `.path-row > div:has(...)`**：
+   gradio 6 把七个框全包在同一个 `.path-row > div.form` 里，`:has()` 会命中那个大容器，
+   一写就把整行压成 104px、然后折成三行（实测过，别重犯）。 */
+.path-row .path-mode-dd {
+    flex: 0 0 104px !important;
+    min-width: 104px !important;
+    max-width: 104px !important;
+}
+.path-row .path-mode-dd input,
+.path-row .path-mode-dd [role="combobox"] {
+    padding-left: 2px !important;
+    padding-right: 0 !important;
+}
+
 /* 顶部工具栏 */
 .top-toolbar-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 4px 10px;
     background: #1c2027;
     border: 1px solid #2b303c;
     border-radius: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
+    /* 一行到底：七个列名复选框宁可缩字号，也不许折成第二行白占 40px */
+    flex-wrap: nowrap !important;
+}
+.top-toolbar-row > * { min-width: 0 !important; }
+
+/* 场次下拉也压一档：它带 label（12px）+ 输入框（30px）+ block 内边距 */
+.top-toolbar-row .block { padding: 2px 4px !important; }
+.top-toolbar-row label { margin-bottom: 0 !important; }
+.top-toolbar-row label > span {
+    font-size: 10.5px !important;
+    line-height: 12px !important;
+    margin-bottom: 1px !important;
+}
+.top-toolbar-row [role="combobox"],
+.top-toolbar-row .wrap-inner input { font-size: 11px !important; }
+
+/* 「上一场 / 下一场」以前被压成竖排三个字（高 96px，直接把整行撑到 142px）。
+   文字不许折行，宽度按内容给。 */
+.top-toolbar-row button {
+    white-space: nowrap !important;
+    min-height: 26px !important;
+    font-size: 11px !important;
+    padding: 0 8px !important;
+    flex: 0 0 auto !important;
 }
 
 .col-checkbox-wrap {
     flex: 1;
     display: flex;
     align-items: center;
+    min-width: 0;
 }
+
+/* 【隐藏/显示列：从 126px 压到 ~40px】
+   gradio 的复选框默认 14px 字、6px 12px 内边距 → 每个 35px 高，七个排两行。
+   这里压成 10.5px 的窄标签：一行放得下，且点上去比原来更清楚（有底框）。 */
+.col-checkbox-wrap fieldset {
+    padding: 2px 6px !important;
+    border: none !important;
+    min-height: 0 !important;
+}
+.col-checkbox-wrap fieldset > span {
+    margin-bottom: 2px !important;
+    font-size: 10.5px !important;
+    line-height: 12px !important;
+}
+.col-checkbox-wrap fieldset .wrap {
+    gap: 4px !important;
+    row-gap: 3px !important;
+}
+.col-checkbox-wrap fieldset label {
+    font-size: 10.5px !important;
+    line-height: 12px !important;
+    padding: 1px 5px !important;
+    border: 1px solid #2f3542 !important;
+    border-radius: 5px !important;
+    background: #20242c;
+    white-space: nowrap !important;
+}
+/* 【必须显式给字色】gradio 的复选框文字用 var(--body-text-color)（深色 #27272a），
+   在深色底上等于隐形 —— 上一版实测只剩一个橙点，一个字都看不见。 */
+.col-checkbox-wrap fieldset label,
+.col-checkbox-wrap fieldset label span { color: #dfe4ec !important; }
+.col-checkbox-wrap fieldset label span { font-size: 10.5px !important; }
+.col-checkbox-wrap fieldset label input { width: 11px !important; height: 11px !important; margin: 0 2px 0 0 !important; }
+/* 选中态：亮一点边框就够，别加高 */
+.col-checkbox-wrap fieldset label.selected { border-color: #4f6a8a !important; background: #232b36; }
 
 .view-toolbar-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
+    padding: 3px 10px;
     background: #1c2027;
     border: 1px solid #2b303c;
     border-radius: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
     flex-wrap: nowrap;
+}
+/* 这一行里的「📐 视图微调」是 Markdown，默认 <p> 带 1em 上下边距，
+   撑着那一格到 71px —— 一行 28px 的按钮行被它顶到 81px。清掉边距即可。 */
+.view-toolbar-row .prose,
+.view-toolbar-row [data-testid="markdown"],
+.view-toolbar-row .md {
+    font-size: 11px !important;
+    line-height: 14px !important;
+}
+.view-toolbar-row .prose p,
+.view-toolbar-row [data-testid="markdown"] p {
+    margin: 0 !important;
+    font-size: 11px !important;
+}
+.view-toolbar-row > * { min-width: 0 !important; }
+/* 行首标题：用伪元素画，不占一个 block（见 layout 注释） */
+.view-toolbar-row::before {
+    content: "📐 视图微调";
+    flex: 0 0 auto;
+    font-size: 11px !important;
+    line-height: 14px;
+    color: #c8d1e0;
+    white-space: nowrap;
+    margin-right: 2px;
 }
 
 .view-toolbar-row button {
-    min-height: 28px !important;
-    font-size: 11px !important;
-    padding: 0 8px !important;
+    min-height: 24px !important;
+    font-size: 10.5px !important;
+    padding: 0 6px !important;
     flex-shrink: 0;
 }
 
@@ -599,6 +896,10 @@ CUSTOM_CSS = """
 }
 
 /* 表格视口 */
+/* 【高度锁 72vh，别改】用户 2026-11-02 明确：B 表主表的纵向空间不能动。
+   上方工具栏已经压掉约 150px（冲突区 20→0、场次工具栏 142→81、视图工具栏 81→32），
+   省下来的高度全部让给表格本体，所以这里保持原来的 72vh，
+   不要再写 calc(100vh - Xpx) 去按窗口截——那会把它从 648px 削到 424px。 */
 .storyboard-viewport {
     width: 100%;
     overflow: auto;
@@ -933,11 +1234,61 @@ CUSTOM_CSS = """
     color: #a3be8c;
     font-weight: bold;
     min-width: 0;
-    max-width: 46px;
+    max-width: 34px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     flex-shrink: 0;
+}
+/* 容器标签：一眼看出挂的是无损母版还是压缩预览，不用去翻目录 */
+.asset-badge-audio.ext-wav  { color: #8fbcbb; }
+.asset-badge-audio.ext-flac { color: #b48ead; }
+.asset-badge-audio.ext-mp3  { color: #a3be8c; }
+.audio-fuzzy {
+    color: #ebcb8b;
+    margin-right: 1px;
+    cursor: help;
+}
+
+/* 模式2 找不到音频：原来会退回成和模式1 时长一模一样的灰字，
+   两种语义在界面上完全同形——这才是「C 列搞不清楚」的另一半。
+   现在缺音频是一个明确的、扫一眼就能数出来的方块。 */
+.audio-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    margin-top: 2px;
+    border: 1px dashed #4a4033;
+    background: #221f18;
+    border-radius: 4px;
+    color: #7a6a52;
+    font-size: 11px;
+    letter-spacing: 1px;
+    cursor: help;
+}
+
+/* 表顶的统计条（模式由页面顶部的下拉决定，这里只报数） */
+.sheet-stat-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 3px 6px 5px 6px;
+    font-size: 11px;
+    color: #9aa3b2;
+}
+.stat-item { color: #8b93a3; }
+.stat-item.stat-miss { color: #d08770; font-weight: 600; }
+.stat-item.stat-ok { color: #7f9c6a; }
+/* 「现在在哪个目录找音频」——一行，超长省略，悬停看全 */
+.stat-hint {
+    color: #6b7480;
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1 1 auto;
 }
 
 /* G列视频 */
@@ -1243,7 +1594,7 @@ window.applyColVisibility = function(selectedList) {
     const colMap = {
         "镜头号": "col-shot",
         "小标题": "col-title",
-        "音频结果/镜头时长": "col-dur",
+        "音频 / 镜头时长": "col-dur",
         "台词内容/台词角色": "col-dialogue",
         "图片资产": "col-img",
         "提示词": "col-prompt",
@@ -1539,12 +1890,15 @@ PATH_PICKER_CSS = """
 PATH_PICKER_JS = """
 /* ===== 原生「浏览…」按钮：把系统选择框选到的路径直接回填到输入框 ===== */
 (function () {
+    /* 每个路径框都挂一个。id 与 gr.Textbox(elem_id=...) 一一对应 —— 
+       以前按 label 文字前缀匹配，改名就静默失效（「音频目录」对不上「资产音频」）。 */
     var TARGETS = [
-        { label: '表格 A (资产表)', kind: 'file', title: '选择表格 A（资产表）' },
-        { label: '表格 B (分镜表)', kind: 'file', title: '选择表格 B（分镜表）' },
-        { label: '资产目录', kind: 'dir', title: '选择资产目录' },
-        { label: '音频目录', kind: 'dir', title: '选择音频目录' },
-        { label: '视频目录', kind: 'dir', title: '选择视频目录' }
+        { id: 'sbs-path-a',       kind: 'file', title: '选择表格 A（资产表）' },
+        { id: 'sbs-path-b',       kind: 'file', title: '选择表格 B（分镜表）' },
+        { id: 'sbs-path-audio-b', kind: 'dir',  title: '选择模式2 音频目录' },
+        { id: 'sbs-path-assets',  kind: 'dir',  title: '选择资产目录' },
+        { id: 'sbs-path-audio',   kind: 'dir',  title: '选择资产音频目录' },
+        { id: 'sbs-path-video',   kind: 'dir',  title: '选择视频目录' }
     ];
 
     function setInputValue(input, value) {
@@ -1554,51 +1908,47 @@ PATH_PICKER_JS = """
     }
 
     function mountOne(cfg) {
-        var spans = document.querySelectorAll('span[data-testid="block-info"]');
-        for (var i = 0; i < spans.length; i++) {
-            var txt = (spans[i].textContent || '').trim();
-            if (txt.indexOf(cfg.label) !== 0) continue;          // 只认以标签名开头的那个
-            var blk = spans[i].closest('.block') || spans[i].parentElement;
-            if (!blk) return false;
-            var input = blk.querySelector('input[data-testid="textbox"]');
-            if (!input) return false;
-            var wrap = input.parentElement;
-            if (!wrap) return false;
-            if (wrap.querySelector('.sbs-pick-btn')) return true; // 已挂过，不重复
-            var btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'sbs-pick-btn';
-            btn.textContent = '📁';
-            btn.title = cfg.kind === 'dir' ? '浏览文件夹…' : '浏览文件…';
-            btn.addEventListener('click', function (ev) {
-                ev.preventDefault();
-                ev.stopPropagation();
-                btn.disabled = true;
-                btn.textContent = '⏳';
-                fetch('/api/pick_path', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ kind: cfg.kind, title: cfg.title })
+        var root = document.getElementById(cfg.id);
+        if (!root) return false;
+        if (root.querySelector('.sbs-pick-btn')) return true;      // 已挂过，不重复
+        var input = root.querySelector('input[data-testid="textbox"]')
+                 || root.querySelector('input[type="text"]')
+                 || root.querySelector('textarea');
+        if (!input) return false;
+        var wrap = input.parentElement;
+        if (!wrap) return false;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'sbs-pick-btn';
+        btn.textContent = '📁';
+        btn.title = cfg.kind === 'dir' ? '浏览文件夹…（调用系统选择框）' : '浏览文件…（调用系统选择框）';
+        btn.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            btn.disabled = true;
+            btn.textContent = '⏳';
+            fetch('/api/pick_path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind: cfg.kind, title: cfg.title })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (j) {
+                    if (j.status === 'ok' && j.path) {
+                        setInputValue(input, j.path);
+                        if (window.showToast) showToast('已填入：' + j.path, 'success');
+                    } else if (j.status === 'error' && window.showToast) {
+                        showToast(j.msg || '选择失败', 'error');
+                    }
                 })
-                    .then(function (r) { return r.json(); })
-                    .then(function (j) {
-                        if (j.status === 'ok' && j.path) {
-                            setInputValue(input, j.path);
-                            if (window.showToast) showToast('已填入：' + j.path, 'success');
-                        } else if (j.status === 'error' && window.showToast) {
-                            showToast(j.msg || '选择失败', 'error');
-                        }
-                    })
-                    .catch(function () {
-                        if (window.showToast) showToast('无法调用系统选择框，请手动粘贴路径', 'error');
-                    })
-                    .then(function () { btn.disabled = false; btn.textContent = '📁'; });
-            });
-            wrap.classList.add('sbs-input-wrap');
-            wrap.appendChild(btn);
-            return true;
-        }
-        return false;
+                .catch(function () {
+                    if (window.showToast) showToast('无法调用系统选择框，请手动粘贴路径', 'error');
+                })
+                .then(function () { btn.disabled = false; btn.textContent = '📁'; });
+        });
+        wrap.classList.add('sbs-input-wrap');
+        wrap.appendChild(btn);
+        return true;
     }
 
     function mountAll() { TARGETS.forEach(mountOne); }
@@ -1743,19 +2093,34 @@ CUSTOM_JS = CUSTOM_JS + HEARTBEAT_JS
 class StoryboardApp:
     def __init__(self):
         self.excel_b_path, self.asset_dir, self.video_dir, self.audio_dir = "", "", "", ""
+        # 模式2 的音频成品目录（跟镜头号同名的 wav/mp3/flac 放这里）。
+        # 与上面的 audio_dir 是两件事：audio_dir 是「资产音频」（给 A 表 X/Y/Z 试听），
+        # audio_b_dir 是「footage 音频」（给 B 表 C 列挂播放器）。混用会出现
+        # 拿角色样音去对 s001-01 的荒唐匹配。
+        self.audio_b_dir = ""
+        self._audio_b_index = {}
+        self._audio_b_conflicts = []
+        self._audio_b_key = None      # 缓存键=(目录, 是否存在的时刻不需要)，加载工程时置 None 强制重扫
         self.image_index = {}
         self.image_conflicts = []
         self.audio_index = {}
         self.audio_conflicts = []
         self.video_paths = []
         self.b_sheets, self.current_sheet_b = [], ""
+        # 表格B 的模式：auto / ref2v / digital_human。存在内存里，切场次时不必每次重传。
+        self.b_mode = "auto"
 
-    def load_project(self, path_a, path_b, asset_p, video_p, audio_p, current_sheet_val):
-        save_config(path_a, path_b, asset_p, video_p, audio_p)
+    def load_project(self, path_a, path_b, asset_p, video_p, audio_p, current_sheet_val, b_mode=None,
+                     audio_b_p=None):
         self.excel_b_path = clean_path(path_b)
         self.asset_dir = clean_path(asset_p)
         self.video_dir = clean_path(video_p)
         self.audio_dir = clean_path(audio_p)
+        if audio_b_p is not None:
+            self.audio_b_dir = clean_path(audio_b_p)
+        self._audio_b_key = None      # 点了「加载/刷新」就当文件可能变过，下次取索引重扫
+        if b_mode in B_MODES:
+            self.b_mode = b_mode
 
         self.image_index, self.image_conflicts = build_image_index(self.asset_dir)
         
@@ -1783,7 +2148,55 @@ class StoryboardApp:
                 self.current_sheet_b = default_sheet
             except Exception as e:
                 gr.Warning(f"读取分镜表失败: {e}")
-        return gr.update(choices=sheet_choices, value=default_sheet)
+
+        # 顶部的模式开关跟着**文件本身**走：打开的是模式2 的表，就该按模式2 显示，
+        # 否则用户看到一片「未配音」会以为音频全丢了。
+        # 这是「加载」这个动作的结果，不是锁死——加载完照样可以手动切。
+        detected = b_mode if b_mode in ("ref2v", "digital_human") else self.b_mode
+        if default_sheet:
+            try:
+                detected = detect_table_mode(pd.read_excel(self.excel_b_path, sheet_name=default_sheet))
+            except Exception:
+                pass
+        if detected not in ("ref2v", "digital_human"):
+            detected = "ref2v"
+        self.b_mode = detected
+        save_config(path_a, path_b, asset_p, video_p, audio_p, detected, self.audio_b_dir)
+        return gr.update(choices=sheet_choices, value=default_sheet), gr.update(value=detected)
+
+    def audio_dir_for_b(self):
+        """模式2 音频成品目录：填了就用它，不填就是**资产目录本身**。
+
+        不去猜 `资产目录/Audio` 之类的子目录：`build_audio_index` 走 `os.walk`，
+        整个资产树逐层遍历，`资产/Audio/s001-01.wav`、`资产/2026-11-02/batch1/s001-01.wav`
+        一样命中。少一层「它在哪个子目录」的猜测，就少一次「放好了却显示未配音」。
+        注意这里**不掺「资产音频」那个框**——那是 A 表 X/Y/Z 的样音，混进来会把
+        `X01.wav` 当成 footage 音轨。
+        """
+        if self.audio_b_dir and os.path.isdir(self.audio_b_dir):
+            return self.audio_b_dir
+        return self.asset_dir
+
+    def audio_index_for_b(self, force=False):
+        """模式2 用的音频索引。模式1 直接返回空表——整棵树不扫，
+        大目录（NAS / 素材盘）切场次时才不会卡。"""
+        if self.b_mode != "digital_human":
+            return {}
+        d = self.audio_dir_for_b()
+        if force or self._audio_b_key != d:
+            self._audio_b_index, self._audio_b_conflicts = build_audio_index(d)
+            self._audio_b_key = d
+        return self._audio_b_index
+
+    def audio_b_hint(self):
+        """顶部状态提示用：现在实际在哪个目录找音频、找到几条。"""
+        if self.b_mode != "digital_human":
+            return ""
+        d = self.audio_dir_for_b()
+        if not d:
+            return "未设置资产目录，模式2 无法定位音频"
+        origin = "模式2 音频" if (self.audio_b_dir and os.path.isdir(self.audio_b_dir)) else "资产目录兜底"
+        return f"音频：{d}（{origin}，含子目录）"
 
     def get_conflict_html(self):
         items = []
@@ -1791,14 +2204,21 @@ class StoryboardApp:
             items.append(f"<span class='conflict-item'>📷 图片冲突：{'<br>'.join(self.image_conflicts)}</span>")
         if self.audio_conflicts:
             items.append(f"<span class='conflict-item'>🔊 音频冲突：{'<br>'.join(self.audio_conflicts)}</span>")
+        if self._audio_b_conflicts:
+            items.append(f"<span class='conflict-item'>🎬 成品音频冲突：{'<br>'.join(self._audio_b_conflicts)}</span>")
         return f"<div class='conflict-panel'>{''.join(items)}</div>"
 
-    def load_sheet_b_content(self, sheet_name):
+    def load_sheet_b_content(self, sheet_name, b_mode=None):
+        if b_mode in B_MODES:
+            self.b_mode = b_mode
         if not self.excel_b_path or not os.path.exists(self.excel_b_path) or not sheet_name:
             return "<div class='empty-tip'>请先加载分镜表</div>"
         self.current_sheet_b = sheet_name
         df = pd.read_excel(self.excel_b_path, sheet_name=sheet_name)
-        return render_table_b_html(df, self.image_index, self.audio_index, self.video_paths, sheet_name)
+        # 模式2 用「成品音频目录」的索引；模式1 传空表（不扫盘、不显示播放器）
+        return render_table_b_html(df, self.image_index, self.audio_index_for_b(),
+                                   self.video_paths, sheet_name, self.b_mode,
+                                   audio_hint=self.audio_b_hint())
 
     def step_sheet(self, direction, current_sheet):
         if not self.b_sheets or current_sheet not in self.b_sheets:
@@ -1811,18 +2231,45 @@ class StoryboardApp:
 
 app_core = StoryboardApp()
 init_conf = load_config()
+# 下拉只给两项。旧配置里可能存着 "auto"（早先的自动识别档），这里落到模式1，
+# 等点「🚀 加载/刷新工程」时再按文件实际内容自动认一次，不会一直错着。
+_init_b_mode = init_conf.get("b_mode")
+if _init_b_mode not in ("ref2v", "digital_human"):
+    _init_b_mode = "ref2v"
 
 # ==============================
 # 6. UI 页面构建
 # ==============================
 with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
-    with gr.Row():
-        txt_path_a = gr.Textbox(label="表格 A (资产表)", value=init_conf.get("path_a", ""), lines=1, max_lines=1, scale=2)
-        txt_path_b = gr.Textbox(label="表格 B (分镜表)", value=init_conf.get("path_b", ""), lines=1, max_lines=1, scale=2)
-        txt_asset_dir = gr.Textbox(label="资产目录", value=init_conf.get("asset_dir", ""), lines=1, max_lines=1, scale=2)
-        txt_audio_dir = gr.Textbox(label="音频目录", value=init_conf.get("audio_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认资产目录/Audio")
-        txt_video_dir = gr.Textbox(label="视频目录", value=init_conf.get("video_dir", ""), lines=1, max_lines=1, scale=1, placeholder="不填默认同资产目录")
-        btn_load_project = gr.Button("🚀 加载/刷新工程", variant="primary", scale=0, size="sm", min_width=104)
+    # 顶部路径行：**强制一行不折行**（elem_classes="path-row" + CSS nowrap）。
+    # gradio 默认给每个 block 320px 最小宽度，七个框一行必然被挤到第二行 ——
+    # 所以每个框都显式给 min_width，并在 CSS 里把 min-width 归零，靠 scale 分宽度。
+    # elem_id 是给前端 📁 按钮用的**唯一锚点**：以前靠 label 文字去猜是哪一个框，
+    # 改一个字（「音频目录」→「资产音频」）按钮就悄悄不挂了。有了 id 就不再猜。
+    with gr.Row(elem_classes="path-row"):
+        txt_path_a = gr.Textbox(label="表格A 资产表", value=init_conf.get("path_a", ""), lines=1, max_lines=1, scale=3, min_width=120, elem_id="sbs-path-a")
+        txt_path_b = gr.Textbox(label="表格B 分镜表", value=init_conf.get("path_b", ""), lines=1, max_lines=1, scale=3, min_width=120, elem_id="sbs-path-b")
+        # 模式开关贴在 B 表路径右边：**先说要哪条管线，再看表**。
+        # 它决定 C 列是「时长」还是「音频线索」，也决定整个 B 表页面的显示方式。
+        # 宽度固定成「模式1 全参考」六个字（见 CSS .path-mode-dd），不再白占横向空间。
+        dd_b_mode = gr.Dropdown(
+            label="B表模式",
+            choices=[("模式1 全参考", "ref2v"), ("模式2 数字人", "digital_human")],
+            value=_init_b_mode,
+            interactive=True, scale=0, min_width=0, elem_classes="path-mode-dd",
+        )
+        # 模式2 的音频成品目录（wav/mp3/flac，文件名就是镜头号）。
+        # 与下面「资产音频」是两件事：那是 X/Y/Z 试听用的样音，这是 footage 的成品音轨。
+        # 不填 → 依次退到 资产音频 → 资产目录/Audio → 资产目录，且都按 os.walk 递归找子目录。
+        txt_audio_b_dir = gr.Textbox(
+            label="模式2 音频", value=init_conf.get("audio_b_dir", ""), lines=1, max_lines=1,
+            scale=2, min_width=110, placeholder="不填→资产目录（含子目录）", elem_id="sbs-path-audio-b",
+        )
+        txt_asset_dir = gr.Textbox(label="资产目录", value=init_conf.get("asset_dir", ""), lines=1, max_lines=1, scale=3, min_width=110, elem_id="sbs-path-assets")
+        txt_audio_dir = gr.Textbox(label="资产音频", value=init_conf.get("audio_dir", ""), lines=1, max_lines=1, scale=2, min_width=90, placeholder="X/Y/Z 试听", elem_id="sbs-path-audio")
+        txt_video_dir = gr.Textbox(label="视频目录", value=init_conf.get("video_dir", ""), lines=1, max_lines=1, scale=2, min_width=90, placeholder="不填同资产", elem_id="sbs-path-video")
+        btn_load_project = gr.Button("🚀 加载/刷新", variant="primary", scale=0, size="sm",
+                               min_width=96, elem_classes="path-go-btn")
 
     with gr.Tabs():
 
@@ -1830,15 +2277,15 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
         build_asset_tab(txt_path_a, txt_asset_dir, txt_audio_dir, btn_load_project)
         with gr.TabItem("📋 表格 B · 影视分镜表"):
             # 冲突提示区
-            conflict_panel = gr.HTML('<div class="conflict-panel"></div>')
+            conflict_panel = gr.HTML('<div class="conflict-panel"></div>', elem_classes="conflict-wrap")
 
             # 第一行：场次 + 隐藏列 + 上下场
             with gr.Row(elem_classes="top-toolbar-row"):
                 dd_sheets_b = gr.Dropdown(label="当前场次", choices=[], interactive=True, scale=2)
                 with gr.Column(scale=3, elem_classes="col-checkbox-wrap"):
                     chk_cols = gr.CheckboxGroup(
-                        choices=["镜头号", "小标题", "音频结果/镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
-                        value=["镜头号", "小标题", "音频结果/镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
+                        choices=["镜头号", "小标题", "音频 / 镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
+                        value=["镜头号", "小标题", "音频 / 镜头时长", "台词内容/台词角色", "图片资产", "提示词", "视频结果"],
                         label="✓ 隐藏/显示列",
                         scale=0
                     )
@@ -1846,8 +2293,10 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
                 btn_next_sheet = gr.Button("下一场 ▶", scale=0, min_width=60)
 
             # 第二行：视图微调
+            # 标题「📐 视图微调」不再用 gr.Markdown：它是个独立 block，在 flex 行里
+            # 要么被压成 32px（只剩半截字），要么被撑到整行（把七个按钮挤成竖条）。
+            # 改由 CSS ::before 画在行首，宽度按内容、不参与分配。
             with gr.Row(elem_classes="view-toolbar-row"):
-                gr.Markdown("**📐 视图微调**", scale=0)
                 btn_w_dec = gr.Button("◀ 栏宽收窄", scale=1)
                 btn_w_inc = gr.Button("▶ 栏宽拉宽", scale=1)
                 btn_h_dec = gr.Button("▲ 行高收紧", scale=1)
@@ -1882,20 +2331,36 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
 
     chk_cols.change(None, inputs=[chk_cols], js="(cols) => { applyColVisibility(cols); }")
 
-    def load_and_refresh(path_a, path_b, asset_p, video_p, audio_p, cur_sheet):
-        sheet_update = app_core.load_project(path_a, path_b, asset_p, video_p, audio_p, cur_sheet)
+    def load_and_refresh(path_a, path_b, asset_p, video_p, audio_p, cur_sheet, b_mode, audio_b_p):
+        sheet_update, mode_update = app_core.load_project(
+            path_a, path_b, asset_p, video_p, audio_p, cur_sheet, b_mode, audio_b_p)
         conflict_html = app_core.get_conflict_html()
         # 表格 B 本体也要跟着重渲染：场次下拉框的值如果没变（本来就是当前场次），
         # change 事件不会触发，网页上的表格就还是旧内容 —— 以前必须手动刷新浏览器
         # 再点一次「加载/刷新工程」才能看到新图，就是这里漏了。
-        sheet_html = app_core.load_sheet_b_content(app_core.current_sheet_b or cur_sheet or "")
-        return sheet_update, conflict_html, sheet_html
+        # 用**刚识别出来的** app_core.b_mode 渲染，而不是传进来的那个：
+        # 否则会出现表头写「镜头时长」、格子却按音频去解析的自相矛盾。
+        sheet_html = app_core.load_sheet_b_content(app_core.current_sheet_b or cur_sheet or "", app_core.b_mode)
+        return sheet_update, mode_update, conflict_html, sheet_html
 
     btn_load_project.click(
         fn=load_and_refresh,
-        inputs=[txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir, dd_sheets_b],
-        outputs=[dd_sheets_b, conflict_panel, html_storyboard_view]
+        inputs=[txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir, dd_sheets_b, dd_b_mode, txt_audio_b_dir],
+        outputs=[dd_sheets_b, dd_b_mode, conflict_panel, html_storyboard_view]
     )
+
+    def _switch_mode(sheet, b_mode):
+        app_core.b_mode = b_mode if b_mode in B_MODES else "ref2v"
+        # 切到模式2 时索引是空的（模式1 不扫盘），这里 force 一次，别让刚切过来就看到满屏「未配音」
+        if app_core.b_mode == "digital_human":
+            app_core.audio_index_for_b(force=True)
+        save_config(txt_path_a.value, txt_path_b.value, txt_asset_dir.value,
+                    txt_video_dir.value, txt_audio_dir.value, app_core.b_mode, txt_audio_b_dir.value)
+        return app_core.load_sheet_b_content(sheet or app_core.current_sheet_b, app_core.b_mode)
+
+    # 用 .input 而不是 .change：加载工程时我们会用输出把下拉框的值改掉（跟着文件走），
+    # .change 对程序性更新也触发，会白渲染一遍；.input 只认真实点击。
+    dd_b_mode.input(fn=_switch_mode, inputs=[dd_sheets_b, dd_b_mode], outputs=[html_storyboard_view])
 
     dd_sheets_b.change(fn=app_core.load_sheet_b_content, inputs=[dd_sheets_b], outputs=[html_storyboard_view])
     btn_prev_sheet.click(fn=lambda cur: app_core.step_sheet(-1, cur), inputs=[dd_sheets_b], outputs=[dd_sheets_b, html_storyboard_view])
@@ -1908,17 +2373,21 @@ with gr.Blocks(title="StoryBoardStudio 分镜工作台") as demo:
     # 所以只靠 value=init_conf 的话：改了路径不重启服务，刷新页面还是旧值（甚至空值）。
     # 这里补两件事：①每次打开/刷新页面都从 config.json 重新回填；
     #              ②光标离开任意一个路径框就落盘，不必等点「🚀 加载/刷新工程」。
-    _path_boxes = [txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir]
+    _path_boxes = [txt_path_a, txt_path_b, txt_asset_dir, txt_video_dir, txt_audio_dir, txt_audio_b_dir]
 
     def _prefill_paths():
         c = load_config()
+        bm = c.get("b_mode")
+        if bm not in ("ref2v", "digital_human"):
+            bm = "ref2v"          # 旧配置里的 "auto" 之类，下拉框只收两项
         return (c.get("path_a", ""), c.get("path_b", ""), c.get("asset_dir", ""),
-                c.get("video_dir", ""), c.get("audio_dir", ""))
+                c.get("video_dir", ""), c.get("audio_dir", ""), c.get("audio_b_dir", ""), bm)
 
-    def _persist_paths(path_a, path_b, asset_dir, video_dir, audio_dir):
-        save_config(path_a, path_b, asset_dir, video_dir, audio_dir)
+    def _persist_paths(path_a, path_b, asset_dir, video_dir, audio_dir, audio_b_dir):
+        # b_mode 传 None：路径框失焦时不要把用户刚切好的模式撞回 auto
+        save_config(path_a, path_b, asset_dir, video_dir, audio_dir, None, audio_b_dir)
 
-    demo.load(fn=_prefill_paths, inputs=None, outputs=_path_boxes)
+    demo.load(fn=_prefill_paths, inputs=None, outputs=_path_boxes + [dd_b_mode])
     # change：手打、粘贴、以及点「📁 浏览…」由前端派发的 input/change 都能盖住
     # blur  ：手打完直接点别处（不触发 change 的边角情况）也落一次盘
     for _box in _path_boxes:

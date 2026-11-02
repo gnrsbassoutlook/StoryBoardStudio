@@ -1409,8 +1409,9 @@ def build_asset_tab(txt_path_a, txt_asset_dir, txt_audio_dir, btn_load_project,
         # 说明文案（预览列吸附 / 快捷键 / 命名硬规则）已移到 README.md，
         # 界面上不再占纵向空间；`.a-keycap` 样式随之弃用。
 
+        # 行首「📐 视图微调」标题改由 .view-toolbar-row::before 画（见 StoryBoardStudio.py 的 CSS）：
+        # 它原来是一个 gr.Markdown block，在 flex 行里会被压成 32px 或撑满整行。
         with gr.Row(elem_classes="view-toolbar-row"):
-            gr.Markdown("**📐 视图微调**", scale=0)
             a_w_dec = gr.Button("◀ 栏宽收窄", scale=1)
             a_w_inc = gr.Button("▶ 栏宽拉宽", scale=1)
             a_h_dec = gr.Button("▲ 行高收紧", scale=1)
